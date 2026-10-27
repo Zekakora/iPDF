@@ -140,16 +140,27 @@ class MainActivity : ComponentActivity() {
         // The official PenEngine touch-film SDK registers for the pen button and decodes its
         // gestures. It consumes the key and reports via onTouchFilmFunction when present.
         if (MiuiTouchFilm.onDispatchKeyEvent(event)) return true
-        // Fallback for pens/ROMs that deliver the raw key directly (Focus Pen Pro = F19).
-        val isPenButton = event.keyCode == KeyEvent.KEYCODE_F19 ||
+        // Fallback for pens/ROMs that deliver the raw key directly. Focus Pen Pro is exposed by
+        // this tablet as vendor/product 0x0022/0x5081 and can report F19, PAGE_UP/DOWN, or one of
+        // the HID BUTTON_7..10 usages depending on the HyperOS input path in use.
+        val isFocusPenRawButton = isFocusPenDevice(event) && when (event.keyCode) {
+            KeyEvent.KEYCODE_F19,
+            KeyEvent.KEYCODE_PAGE_UP,
+            KeyEvent.KEYCODE_PAGE_DOWN,
+            KeyEvent.KEYCODE_BUTTON_7,
+            KeyEvent.KEYCODE_BUTTON_8,
+            KeyEvent.KEYCODE_BUTTON_9,
+            KeyEvent.KEYCODE_BUTTON_10 -> true
+            else -> false
+        }
+        val isPenButton = isFocusPenRawButton ||
             event.keyCode == KeyEvent.KEYCODE_STYLUS_BUTTON_PRIMARY ||
             event.keyCode == KeyEvent.KEYCODE_STYLUS_BUTTON_SECONDARY ||
             event.keyCode == KeyEvent.KEYCODE_STYLUS_BUTTON_TERTIARY ||
             event.keyCode == KeyEvent.KEYCODE_STYLUS_BUTTON_TAIL
-        val isPenPageKey = (event.keyCode == KeyEvent.KEYCODE_PAGE_UP ||
-            event.keyCode == KeyEvent.KEYCODE_PAGE_DOWN) && isFocusPenDevice(event)
-        if (isPenButton || isPenPageKey) {
+        if (isPenButton) {
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                android.util.Log.i("PenButton", "raw key=${event.keyCode} device=${event.deviceId}")
                 penSettings.toggleEraserFromStylus()
             }
             return true
