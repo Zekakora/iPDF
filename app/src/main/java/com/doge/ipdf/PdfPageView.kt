@@ -578,6 +578,17 @@ class PdfPageView(context: Context) : View(context) {
         reportViewport()
     }
 
+    /** Keeps the transient page indicator alive while its page-jump dialog is being edited. */
+    fun pauseScrollbarHide() {
+        if (!scrollbarVisible) return
+        removeCallbacks(hideScrollbarRunnable)
+        emitScrollbarState()
+    }
+
+    fun resumeScrollbarHide() {
+        scheduleScrollbarHide()
+    }
+
     /** Jumps to the top of a one-based page selected in the transient page indicator. */
     fun jumpToPage(pageIndex: Int) {
         if (sizes.isEmpty()) return

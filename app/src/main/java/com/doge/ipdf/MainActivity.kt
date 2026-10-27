@@ -612,6 +612,8 @@ private fun ReaderScreen(
                 onBeginDrag = { pageView.value?.beginScrollbarDrag() },
                 onDrag = { fraction -> pageView.value?.dragScrollbarTo(fraction) },
                 onEndDrag = { pageView.value?.endScrollbarDrag() },
+                onPauseHide = { pageView.value?.pauseScrollbarHide() },
+                onResumeHide = { pageView.value?.resumeScrollbarHide() },
                 onJumpToPage = { page -> pageView.value?.jumpToPage(page) },
                 modifier = Modifier.fillMaxSize(),
             )

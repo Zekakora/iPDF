@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -49,12 +50,18 @@ fun ReaderScrollChrome(
     onBeginDrag: () -> Unit,
     onDrag: (Float) -> Unit,
     onEndDrag: () -> Unit,
+    onPauseHide: () -> Unit,
+    onResumeHide: () -> Unit,
     onJumpToPage: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (!state.visible || state.pageCount < 2) return
 
     var pageDialogOpen by remember { mutableStateOf(false) }
+
+    LaunchedEffect(pageDialogOpen) {
+        if (pageDialogOpen) onPauseHide() else onResumeHide()
+    }
 
     Box(modifier = modifier.fillMaxHeight()) {
         Surface(
