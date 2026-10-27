@@ -497,18 +497,20 @@ private fun ReaderScreen(
     val eraserPixel = penSettings.eraserMode == EraserMode.PIXEL
     val stabilizer = penSettings.stabilizer
     val zoomSpeed = penSettings.zoomSpeed
+    val scrollSpeed = penSettings.scrollSpeed
     var editorAnchor by remember { mutableStateOf<Rect?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
     var readerSize by remember { mutableStateOf(IntSize.Zero) }
 
-    LaunchedEffect(inkRevision, tool, preset, eraserWidth, eraserPixel, stabilizer, zoomSpeed) {
+    LaunchedEffect(inkRevision, tool, preset, eraserWidth, eraserPixel, stabilizer, zoomSpeed, scrollSpeed) {
         pageView.value?.let { view ->
             view.tool = tool
             view.preset = preset
             view.eraserWidthPt = eraserWidth
             view.eraserPixel = eraserPixel
             view.stabilizerStrength = stabilizer
-                            view.zoomSpeed = zoomSpeed
+            view.zoomSpeed = zoomSpeed
+            view.scrollSpeed = scrollSpeed
             view.invalidate()
         }
     }
@@ -530,6 +532,8 @@ private fun ReaderScreen(
                         PdfPageView(ctx).apply {
                             attachSession(session)
                             setTopInset(topBarPx)
+                            this.zoomSpeed = zoomSpeed
+                            this.scrollSpeed = scrollSpeed
                             onViewportChanged = { session.onViewportChanged(it) }
                             onStylusButton = { penSettings.toggleEraserFromStylus() }
                             onAutoMarker = {
@@ -550,7 +554,8 @@ private fun ReaderScreen(
                         view.eraserWidthPt = eraserWidth
                         view.eraserPixel = eraserPixel
                         view.stabilizerStrength = stabilizer
-                                view.zoomSpeed = zoomSpeed
+                        view.zoomSpeed = zoomSpeed
+                        view.scrollSpeed = scrollSpeed
                         view.invalidate()
                     },
                     onRelease = { view -> view.release() },

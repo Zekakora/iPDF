@@ -62,6 +62,10 @@ class PenSettings(context: Context) {
     var zoomSpeed by mutableStateOf(prefs.getFloat("zoomSpeed", 1f).coerceIn(0.5f, 2f))
         private set
 
+    /** Finger-to-page scrolling response for both dragging and fling momentum. */
+    var scrollSpeed by mutableStateOf(prefs.getFloat("scrollSpeed", 1f).coerceIn(0.5f, 2f))
+        private set
+
     /** The pen/highlighter the stylus button restores after erasing. */
     var lastInkTool by mutableStateOf(
         runCatching { PenTool.valueOf(prefs.getString("lastInkTool", null) ?: "") }
@@ -281,6 +285,11 @@ class PenSettings(context: Context) {
         persist()
     }
 
+    fun updateScrollSpeed(value: Float) {
+        scrollSpeed = value.coerceIn(0.5f, 2f)
+        persist()
+    }
+
     private fun persist() {
         prefs.edit()
             .putBoolean("collapsed", collapsed)
@@ -296,6 +305,7 @@ class PenSettings(context: Context) {
             .putString("eraserMode", eraserMode.name)
             .putFloat("stabilizer", stabilizer)
             .putFloat("zoomSpeed", zoomSpeed)
+            .putFloat("scrollSpeed", scrollSpeed)
             .putString("lastInkTool", lastInkTool.name)
             .apply()
     }

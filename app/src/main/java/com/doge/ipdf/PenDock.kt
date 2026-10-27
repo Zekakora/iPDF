@@ -516,6 +516,43 @@ private fun SettingsPanel(settings: PenSettings, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Page scroll speed", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    scrollSpeedLabel(settings.scrollSpeed),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Text(
+                "Controls how far the page moves for the same finger movement, including fling momentum.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Slider(
+                value = settings.scrollSpeed,
+                onValueChange = { settings.updateScrollSpeed(it) },
+                valueRange = 0.5f..2f,
+                steps = 5
+            )
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Slower",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Faster",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.height(12.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 Surface(
                     onClick = onDismiss,
@@ -545,6 +582,9 @@ private fun stabilizerLabel(value: Float): String {
 }
 
 private fun zoomSpeedLabel(value: Float): String =
+    String.format(Locale.US, "%.2f×", value)
+
+private fun scrollSpeedLabel(value: Float): String =
     String.format(Locale.US, "%.2f×", value)
 
 /** Size/colour editor for the currently selected preset (or the eraser size and mode). */

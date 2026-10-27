@@ -130,6 +130,10 @@ class PdfPageView(context: Context) : View(context) {
         set(value) {
             field = value.coerceIn(0.5f, 2f)
         }
+    var scrollSpeed: Float = 1f
+        set(value) {
+            field = value.coerceIn(0.5f, 2f)
+        }
     private var pinching = false
     private var pinchRenderBucket = 1f
     private var scrollY = 0f
@@ -1226,13 +1230,13 @@ class PdfPageView(context: Context) : View(context) {
                 }
                 when (dragMode) {
                     DragMode.VERTICAL -> {
-                        scrollY = (scrollY - (y - lastY)).coerceIn(0f, maxScroll())
+                        scrollY = (scrollY - (y - lastY) * scrollSpeed).coerceIn(0f, maxScroll())
                         scheduleViewportReport()
                         invalidate()
                     }
 
                     DragMode.HORIZONTAL -> {
-                        panX = (panX + (x - lastX)).coerceIn(-maxPan(), maxPan())
+                        panX = (panX + (x - lastX) * scrollSpeed).coerceIn(-maxPan(), maxPan())
                         invalidate()
                     }
 
@@ -1257,7 +1261,7 @@ class PdfPageView(context: Context) : View(context) {
                 if (dragMode == DragMode.VERTICAL) {
                     velocity.computeCurrentVelocity(1000)
                     val vy = velocity.yVelocity
-                    if (abs(vy) > 400f) fling(vy)
+                    if (abs(vy) > 400f) fling(vy * scrollSpeed)
                 }
                 if (tap) handleTap(x, y, event.eventTime)
                 activePointerId = MotionEvent.INVALID_POINTER_ID
