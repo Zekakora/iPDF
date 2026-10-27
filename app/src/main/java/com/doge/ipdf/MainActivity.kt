@@ -512,6 +512,7 @@ private fun ReaderScreen(
     var editorAnchor by remember { mutableStateOf<Rect?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
     var readerSize by remember { mutableStateOf(IntSize.Zero) }
+    var scrollbarState by remember { mutableStateOf(ScrollbarState()) }
 
     LaunchedEffect(inkRevision, tool, preset, eraserWidth, eraserPixel, stabilizer, zoomSpeed, scrollSpeed) {
         pageView.value?.let { view ->
@@ -546,6 +547,7 @@ private fun ReaderScreen(
                             this.zoomSpeed = zoomSpeed
                             this.scrollSpeed = scrollSpeed
                             onViewportChanged = { session.onViewportChanged(it) }
+                            onScrollbarChanged = { scrollbarState = it }
                             onStylusButton = { penSettings.handleStylusButtonPress() }
                             onAutoMarker = {
                                 penSettings.selectTool(PenTool.PEN)
@@ -592,6 +594,7 @@ private fun ReaderScreen(
                 onUndo = { session.undo() },
                 onRedo = { session.redo() },
                 onEditBrush = { editorAnchor = it },
+                forceCollapsed = scrollbarState.dragging,
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .padding(end = 10.dp)
@@ -603,6 +606,15 @@ private fun ReaderScreen(
                     onEditBrush = { editorAnchor = it }
                 )
             }
+            ReaderScrollChrome(
+                state = scrollbarState,
+                topInset = with(LocalDensity.current) { topBarPx.toDp() },
+                onBeginDrag = { pageView.value?.beginScrollbarDrag() },
+                onDrag = { fraction -> pageView.value?.dragScrollbarTo(fraction) },
+                onEndDrag = { pageView.value?.endScrollbarDrag() },
+                onJumpToPage = { page -> pageView.value?.jumpToPage(page) },
+                modifier = Modifier.fillMaxSize(),
+            )
         } else if (!session.ready) {
             Column(
                 modifier = Modifier.fillMaxSize(),

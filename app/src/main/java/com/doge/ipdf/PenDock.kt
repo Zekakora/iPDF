@@ -4,6 +4,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -11,6 +13,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -98,9 +102,11 @@ fun PenDock(
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onEditBrush: (Rect) -> Unit,
+    forceCollapsed: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val showRail = !settings.collapsed && settings.hasPresets && !settings.floatingPresets
+    val dockCollapsed = settings.collapsed || forceCollapsed
+    val showRail = !dockCollapsed && settings.hasPresets && !settings.floatingPresets
 
     Row(
         modifier = modifier,
@@ -117,7 +123,21 @@ fun PenDock(
             }
         }
 
-        if (settings.collapsed) {
+        AnimatedVisibility(
+            visible = dockCollapsed,
+            enter = fadeIn() + scaleIn(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium,
+                ),
+            ),
+            exit = fadeOut() + scaleOut(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMedium,
+                ),
+            ),
+        ) {
             Surface(
                 onClick = { settings.toggleCollapsed() },
                 modifier = Modifier
@@ -132,7 +152,23 @@ fun PenDock(
                     ToolGlyph(settings.tool, MaterialTheme.colorScheme.onSurface)
                 }
             }
-        } else {
+        }
+
+        AnimatedVisibility(
+            visible = !dockCollapsed,
+            enter = fadeIn() + scaleIn(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium,
+                ),
+            ),
+            exit = fadeOut() + scaleOut(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMedium,
+                ),
+            ),
+        ) {
             Surface(
                 shape = RoundedCornerShape(28.dp),
                 color = MaterialTheme.colorScheme.surface,

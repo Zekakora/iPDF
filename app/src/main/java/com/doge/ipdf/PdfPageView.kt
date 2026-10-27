@@ -33,6 +33,15 @@ import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.roundToInt
 
+data class ScrollbarState(
+    val visible: Boolean = false,
+    val dragging: Boolean = false,
+    val page: Int = 0,
+    val pageCount: Int = 0,
+    val fraction: Float = 0f,
+    val thumbFraction: Float = 1f,
+)
+
 /**
  * Single surface that renders the PDF pages, owns vertical scrolling/flinging, horizontal panning,
  * focal pinch-zoom and the stylus ink layer. Nothing is delegated to a parent ScrollView, so there
@@ -52,6 +61,7 @@ class PdfPageView(context: Context) : View(context) {
         private const val PAGE_GAP_PT = 10f
         private const val VIEWPORT_REPORT_MS = 250L
         private const val PALM_WINDOW_MS = 280L
+        private const val SCROLLBAR_HIDE_MS = 1700L
 
         /**
          * Tiles are requested from the draw pass, but only a few per frame: the renderer is a single
@@ -67,6 +77,7 @@ class PdfPageView(context: Context) : View(context) {
     }
 
     var onViewportChanged: ((Viewport) -> Unit)? = null
+    var onScrollbarChanged: ((ScrollbarState) -> Unit)? = null
     var onStylusButton: (() -> Unit)? = null
 
     /**
@@ -196,6 +207,16 @@ class PdfPageView(context: Context) : View(context) {
     private var panX = 0f
     private var topInset = 0
     private var pendingRestore: Viewport? = null
+    private var scrollbarVisible = false
+    private var scrollbarDragging = false
+    private var manualScrollStartPage = -1
+    private var lastScrollbarState = ScrollbarState()
+    private val hideScrollbarRunnable = Runnable {
+        if (!scrollbarDragging) {
+            scrollbarVisible = false
+            emitScrollbarState()
+        }
+    }
 
     // A 512 px ARGB tile is 1 MiB, so a quarter of the heap keeps ~2.5 screens of tiles on a
     // 256 MiB device. The old eighth-of-heap budget could only hold ~14 tiles of the old 768 px
@@ -280,6 +301,9 @@ class PdfPageView(context: Context) : View(context) {
         override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
             if (!pinchCandidate) return false
             abortFling()
+            // A pinch starts with a finger down, but it is not manual page scrolling. Do not let
+            // a zoom that changes the top page reveal the scrollbar.
+            manualScrollStartPage = -1
             dragMode = DragMode.PINCH
             pinching = true
             pinchRenderBucket = renderZoomBucket()
@@ -321,6 +345,7 @@ class PdfPageView(context: Context) : View(context) {
         if (px == topInset) return
         topInset = px
         scrollY = scrollY.coerceIn(0f, maxScroll())
+        emitScrollbarState()
         invalidate()
     }
 
@@ -341,6 +366,11 @@ class PdfPageView(context: Context) : View(context) {
         pinching = false
         scrollY = 0f
         panX = 0f
+        scrollbarVisible = false
+        scrollbarDragging = false
+        manualScrollStartPage = -1
+        removeCallbacks(hideScrollbarRunnable)
+        emitScrollbarState()
         if (cachedSizes.size == pdf.pageCount) {
             sizes.addAll(cachedSizes)
         } else {
@@ -389,6 +419,11 @@ class PdfPageView(context: Context) : View(context) {
         scrollY = 0f
         panX = 0f
         pendingRestore = null
+        scrollbarVisible = false
+        scrollbarDragging = false
+        manualScrollStartPage = -1
+        removeCallbacks(hideScrollbarRunnable)
+        emitScrollbarState()
         invalidate()
         if (oldRenderer != null || oldDescriptor != null) {
             // Close ahead of any queued tile; the generation check makes their results harmless.
@@ -420,6 +455,7 @@ class PdfPageView(context: Context) : View(context) {
             scrollY = scrollY.coerceIn(0f, maxScroll())
             clampPan()
         }
+        emitScrollbarState()
         applyPendingRestore()
     }
 
@@ -441,6 +477,7 @@ class PdfPageView(context: Context) : View(context) {
         val page = viewport.page.coerceIn(0, sizes.size - 1)
         scrollY = ((pageTopPt(page) + viewport.offsetPt) * density * zoom).coerceIn(0f, maxScroll())
         pendingRestore = null
+        emitScrollbarState()
         invalidate()
         reportViewport()
     }
@@ -467,6 +504,92 @@ class PdfPageView(context: Context) : View(context) {
     private fun viewportHeight(): Float = max(0, height - topInset).toFloat()
 
     private fun maxScroll(): Float = (contentHeightPx() - viewportHeight()).coerceAtLeast(0f)
+
+    private fun readingPage(): Int {
+        if (sizes.isEmpty()) return 0
+        return pageAtContentPt((scrollY / scale()).coerceAtLeast(0f))
+            .coerceIn(0, sizes.lastIndex)
+    }
+
+    private fun emitScrollbarState() {
+        val max = maxScroll()
+        val canScroll = sizes.isNotEmpty() && max > 0.5f
+        val state = if (!canScroll || (!scrollbarVisible && !scrollbarDragging)) {
+            ScrollbarState(pageCount = sizes.size)
+        } else {
+            ScrollbarState(
+                visible = scrollbarVisible,
+                dragging = scrollbarDragging,
+                page = readingPage(),
+                pageCount = sizes.size,
+                fraction = (scrollY / max).coerceIn(0f, 1f),
+                thumbFraction = (viewportHeight() / contentHeightPx()).coerceIn(0.045f, 1f),
+            )
+        }
+        if (state != lastScrollbarState) {
+            lastScrollbarState = state
+            onScrollbarChanged?.invoke(state)
+        }
+    }
+
+    private fun revealScrollbarAfterPageCrossing() {
+        if (manualScrollStartPage < 0 || sizes.isEmpty()) return
+        if (readingPage() != manualScrollStartPage) {
+            scrollbarVisible = true
+            emitScrollbarState()
+            if (!scrollbarDragging) {
+                removeCallbacks(hideScrollbarRunnable)
+                postDelayed(hideScrollbarRunnable, SCROLLBAR_HIDE_MS)
+            }
+        }
+    }
+
+    private fun scheduleScrollbarHide() {
+        if (!scrollbarVisible || scrollbarDragging) return
+        removeCallbacks(hideScrollbarRunnable)
+        postDelayed(hideScrollbarRunnable, SCROLLBAR_HIDE_MS)
+    }
+
+    /** Starts a drag from the overlay scrollbar and keeps it visible until the drag ends. */
+    fun beginScrollbarDrag() {
+        if (sizes.isEmpty() || maxScroll() <= 0.5f) return
+        abortFling()
+        removeCallbacks(hideScrollbarRunnable)
+        scrollbarVisible = true
+        scrollbarDragging = true
+        emitScrollbarState()
+    }
+
+    /** Moves the document to a normalized scrollbar position. */
+    fun dragScrollbarTo(fraction: Float) {
+        if (sizes.isEmpty() || maxScroll() <= 0.5f) return
+        scrollY = (maxScroll() * fraction.coerceIn(0f, 1f)).coerceIn(0f, maxScroll())
+        scrollbarVisible = true
+        scheduleViewportReport()
+        emitScrollbarState()
+        invalidate()
+    }
+
+    fun endScrollbarDrag() {
+        if (!scrollbarDragging) return
+        scrollbarDragging = false
+        emitScrollbarState()
+        scheduleScrollbarHide()
+        reportViewport()
+    }
+
+    /** Jumps to the top of a one-based page selected in the transient page indicator. */
+    fun jumpToPage(pageIndex: Int) {
+        if (sizes.isEmpty()) return
+        abortFling()
+        val page = pageIndex.coerceIn(0, sizes.lastIndex)
+        scrollY = (pageTopPt(page) * scale() - topInset).coerceIn(0f, maxScroll())
+        scrollbarVisible = maxScroll() > 0.5f
+        emitScrollbarState()
+        scheduleScrollbarHide()
+        scheduleViewportReport()
+        invalidate()
+    }
 
     private fun maxPan(): Float {
         if (sizes.isEmpty()) return 0f
@@ -1459,6 +1582,7 @@ class PdfPageView(context: Context) : View(context) {
                 lastX = x
                 lastY = y
                 dragMode = DragMode.UNDECIDED
+                manualScrollStartPage = readingPage()
                 velocity.clear()
                 velocity.addMovement(event)
             }
@@ -1484,6 +1608,7 @@ class PdfPageView(context: Context) : View(context) {
                 when (dragMode) {
                     DragMode.VERTICAL -> {
                         scrollY = (scrollY - (y - lastY) * scrollSpeed).coerceIn(0f, maxScroll())
+                        revealScrollbarAfterPageCrossing()
                         scheduleViewportReport()
                         invalidate()
                     }
@@ -1516,6 +1641,11 @@ class PdfPageView(context: Context) : View(context) {
                     val vy = velocity.yVelocity
                     if (abs(vy) > 400f) fling(vy * scrollSpeed)
                 }
+                revealScrollbarAfterPageCrossing()
+                if (scroller.isFinished) {
+                    manualScrollStartPage = -1
+                    scheduleScrollbarHide()
+                }
                 if (tap) handleTap(x, y, event.eventTime)
                 activePointerId = MotionEvent.INVALID_POINTER_ID
                 dragMode = DragMode.NONE
@@ -1526,6 +1656,8 @@ class PdfPageView(context: Context) : View(context) {
             MotionEvent.ACTION_CANCEL -> {
                 activePointerId = MotionEvent.INVALID_POINTER_ID
                 dragMode = DragMode.NONE
+                manualScrollStartPage = -1
+                scheduleScrollbarHide()
                 resetTouchGuard()
                 reportViewport()
             }
@@ -1564,8 +1696,14 @@ class PdfPageView(context: Context) : View(context) {
     override fun computeScroll() {
         if (scroller.computeScrollOffset()) {
             scrollY = scroller.currY.toFloat().coerceIn(0f, maxScroll())
+            revealScrollbarAfterPageCrossing()
+            emitScrollbarState()
             scheduleViewportReport()
             postInvalidateOnAnimation()
+        } else if (manualScrollStartPage >= 0) {
+            revealScrollbarAfterPageCrossing()
+            manualScrollStartPage = -1
+            scheduleScrollbarHide()
         }
     }
 
