@@ -42,7 +42,7 @@ import kotlin.math.floor
 class PdfPageView(context: Context) : View(context) {
     companion object {
         private const val MIN_ZOOM = 0.5f
-        private const val MAX_ZOOM = 4f
+        private const val MAX_ZOOM = 8f
         private const val TILE_SIZE_PX = 768
         private const val PAGE_GAP_PT = 10f
         private const val VIEWPORT_REPORT_MS = 250L
@@ -454,7 +454,8 @@ class PdfPageView(context: Context) : View(context) {
         zoom < 0.707f -> 0.5f
         zoom < 1.414f -> 1f
         zoom < 2.828f -> 2f
-        else -> 4f
+        zoom < 5.657f -> 4f
+        else -> 8f
     }
 
     private fun drawPageTiles(
