@@ -35,8 +35,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import kotlin.math.max
@@ -179,6 +181,9 @@ private fun PageJumpDialog(
     onConfirm: (Int) -> Unit,
 ) {
     var input by remember(initialPage) { mutableStateOf(initialPage.toString()) }
+    fun confirmPage() {
+        input.toIntOrNull()?.takeIf { it in 1..pageCount }?.let(onConfirm)
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Jump to page") },
@@ -188,13 +193,17 @@ private fun PageJumpDialog(
                 onValueChange = { value -> input = value.filter(Char::isDigit).take(7) },
                 singleLine = true,
                 label = { Text("Page 1–$pageCount") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Done,
+                ),
+                keyboardActions = KeyboardActions(onDone = { confirmPage() }),
             )
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    input.toIntOrNull()?.takeIf { it in 1..pageCount }?.let(onConfirm)
+                    confirmPage()
                 },
             ) { Text("Jump") }
         },
