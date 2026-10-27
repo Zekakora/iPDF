@@ -112,108 +112,130 @@ fun PenDock(
         modifier = modifier.width(180.dp),
         contentAlignment = Alignment.CenterEnd,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            AnimatedVisibility(
-                visible = showRail,
-                enter = fadeIn() + expandHorizontally(expandFrom = Alignment.End),
-                exit = fadeOut() + shrinkHorizontally(shrinkTowards = Alignment.End)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    PresetRail(settings = settings, onEditBrush = onEditBrush)
-                    Spacer(Modifier.width(8.dp))
-                }
-            }
-
-            AnimatedVisibility(
-                visible = dockCollapsed,
-                enter = fadeIn() + scaleIn(
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioMediumBouncy,
-                        stiffness = Spring.StiffnessMedium,
-                    ),
-                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
+        // The expanded dock and the bubble are separate layers with the same right anchor. If
+        // they share one Row, the bubble is temporarily laid out to the left of the exiting dock
+        // and then jumps right when that dock disappears.
+        AnimatedVisibility(
+            visible = !dockCollapsed,
+            modifier = Modifier.align(Alignment.CenterEnd),
+            enter = fadeIn() + scaleIn(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium,
                 ),
-                exit = fadeOut() + scaleOut(
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioNoBouncy,
-                        stiffness = Spring.StiffnessMedium,
-                    ),
-                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
+                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
+            ),
+            exit = fadeOut() + scaleOut(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMedium,
                 ),
-            ) {
-                Surface(
-                    onClick = { settings.toggleCollapsed() },
-                    modifier = Modifier
-                        .size(52.dp)
-                        .semantics { contentDescription = "Show pen tools" },
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 3.dp,
-                    shadowElevation = 8.dp
+                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
+            ),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AnimatedVisibility(
+                    visible = showRail,
+                    enter = fadeIn() + expandHorizontally(expandFrom = Alignment.End),
+                    exit = fadeOut() + shrinkHorizontally(shrinkTowards = Alignment.End)
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        ToolGlyph(settings.tool, MaterialTheme.colorScheme.onSurface)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        PresetRail(settings = settings, onEditBrush = onEditBrush)
+                        Spacer(Modifier.width(8.dp))
                     }
                 }
-            }
 
-            AnimatedVisibility(
-                visible = !dockCollapsed,
-                enter = fadeIn() + scaleIn(
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioMediumBouncy,
-                        stiffness = Spring.StiffnessMedium,
-                    ),
-                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
+                ExpandedDock(
+                    settings = settings,
+                    canUndo = canUndo,
+                    canRedo = canRedo,
+                    onUndo = onUndo,
+                    onRedo = onRedo,
+                )
+            }
+        }
+
+        AnimatedVisibility(
+            visible = dockCollapsed,
+            modifier = Modifier.align(Alignment.CenterEnd),
+            enter = fadeIn() + scaleIn(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium,
                 ),
-                exit = fadeOut() + scaleOut(
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioNoBouncy,
-                        stiffness = Spring.StiffnessMedium,
-                    ),
-                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
+                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
+            ),
+            exit = fadeOut() + scaleOut(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMedium,
                 ),
+                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
+            ),
+        ) {
+            Surface(
+                onClick = { settings.toggleCollapsed() },
+                modifier = Modifier
+                    .size(52.dp)
+                    .semantics { contentDescription = "Show pen tools" },
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 3.dp,
+                shadowElevation = 8.dp
             ) {
-                Surface(
-                    shape = RoundedCornerShape(28.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 3.dp,
-                    shadowElevation = 10.dp
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        DockToolButton(PenTool.PEN, settings)
-                        DockToolButton(PenTool.HIGHLIGHTER, settings)
-                        DockToolButton(PenTool.ERASER, settings)
-                        DockToolButton(PenTool.LASSO, settings)
-                        HorizontalDivider(
-                            modifier = Modifier
-                                .width(26.dp)
-                                .padding(vertical = 4.dp),
-                            color = MaterialTheme.colorScheme.outlineVariant
-                        )
-                        HistoryButton(undo = true, enabled = canUndo, onClick = onUndo)
-                        HistoryButton(undo = false, enabled = canRedo, onClick = onRedo)
-                        HorizontalDivider(
-                            modifier = Modifier
-                                .width(26.dp)
-                                .padding(vertical = 4.dp),
-                            color = MaterialTheme.colorScheme.outlineVariant
-                        )
-                        Box(
-                            modifier = Modifier
-                                .size(30.dp, 32.dp)
-                                .clickable { settings.toggleCollapsed() }
-                                .semantics { contentDescription = "Hide pen tools" },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            ChevronGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
+                Box(contentAlignment = Alignment.Center) {
+                    ToolGlyph(settings.tool, MaterialTheme.colorScheme.onSurface)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExpandedDock(
+    settings: PenSettings,
+    canUndo: Boolean,
+    canRedo: Boolean,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+        shadowElevation = 10.dp
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            DockToolButton(PenTool.PEN, settings)
+            DockToolButton(PenTool.HIGHLIGHTER, settings)
+            DockToolButton(PenTool.ERASER, settings)
+            DockToolButton(PenTool.LASSO, settings)
+            HorizontalDivider(
+                modifier = Modifier
+                    .width(26.dp)
+                    .padding(vertical = 4.dp),
+                color = MaterialTheme.colorScheme.outlineVariant
+            )
+            HistoryButton(undo = true, enabled = canUndo, onClick = onUndo)
+            HistoryButton(undo = false, enabled = canRedo, onClick = onRedo)
+            HorizontalDivider(
+                modifier = Modifier
+                    .width(26.dp)
+                    .padding(vertical = 4.dp),
+                color = MaterialTheme.colorScheme.outlineVariant
+            )
+            Box(
+                modifier = Modifier
+                    .size(30.dp, 32.dp)
+                    .clickable { settings.toggleCollapsed() }
+                    .semantics { contentDescription = "Hide pen tools" },
+                contentAlignment = Alignment.Center
+            ) {
+                ChevronGlyph(MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
