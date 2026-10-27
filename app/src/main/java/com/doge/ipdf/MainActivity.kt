@@ -496,17 +496,19 @@ private fun ReaderScreen(
     val eraserWidth = penSettings.eraserWidth
     val eraserPixel = penSettings.eraserMode == EraserMode.PIXEL
     val stabilizer = penSettings.stabilizer
+    val zoomSpeed = penSettings.zoomSpeed
     var editorAnchor by remember { mutableStateOf<Rect?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
     var readerSize by remember { mutableStateOf(IntSize.Zero) }
 
-    LaunchedEffect(inkRevision, tool, preset, eraserWidth, eraserPixel, stabilizer) {
+    LaunchedEffect(inkRevision, tool, preset, eraserWidth, eraserPixel, stabilizer, zoomSpeed) {
         pageView.value?.let { view ->
             view.tool = tool
             view.preset = preset
             view.eraserWidthPt = eraserWidth
             view.eraserPixel = eraserPixel
             view.stabilizerStrength = stabilizer
+                            view.zoomSpeed = zoomSpeed
             view.invalidate()
         }
     }
@@ -548,6 +550,7 @@ private fun ReaderScreen(
                         view.eraserWidthPt = eraserWidth
                         view.eraserPixel = eraserPixel
                         view.stabilizerStrength = stabilizer
+                                view.zoomSpeed = zoomSpeed
                         view.invalidate()
                     },
                     onRelease = { view -> view.release() },

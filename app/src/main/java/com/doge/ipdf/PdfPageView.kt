@@ -27,7 +27,9 @@ import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.ceil
+import kotlin.math.exp
 import kotlin.math.floor
+import kotlin.math.ln
 
 /**
  * Single surface that renders the PDF pages, owns vertical scrolling/flinging, horizontal panning,
@@ -124,6 +126,10 @@ class PdfPageView(context: Context) : View(context) {
     private val failedTiles = HashSet<TileKey>()
 
     private var zoom = 1f
+    var zoomSpeed: Float = 1f
+        set(value) {
+            field = value.coerceIn(0.5f, 2f)
+        }
     private var pinching = false
     private var pinchRenderBucket = 1f
     private var scrollY = 0f
@@ -218,7 +224,9 @@ class PdfPageView(context: Context) : View(context) {
         }
 
         override fun onScale(detector: ScaleGestureDetector): Boolean {
-            val target = (zoom * detector.scaleFactor).coerceIn(MIN_ZOOM, MAX_ZOOM)
+            val rawFactor = detector.scaleFactor.coerceAtLeast(0.001f).toDouble()
+            val adjustedFactor = exp(ln(rawFactor) * zoomSpeed.toDouble()).toFloat()
+            val target = (zoom * adjustedFactor).coerceIn(MIN_ZOOM, MAX_ZOOM)
             if (abs(target - zoom) < 0.0005f) return true
             zoomAround(detector.focusX, detector.focusY, target)
             return true

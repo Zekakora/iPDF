@@ -58,6 +58,10 @@ class PenSettings(context: Context) {
     var stabilizer by mutableStateOf(prefs.getFloat("stabilizer", 0.3f).coerceIn(0f, 1f))
         private set
 
+    /** Pinch zoom response: 1 = the platform's normal scale, below/above it is slower/faster. */
+    var zoomSpeed by mutableStateOf(prefs.getFloat("zoomSpeed", 1f).coerceIn(0.5f, 2f))
+        private set
+
     /** The pen/highlighter the stylus button restores after erasing. */
     var lastInkTool by mutableStateOf(
         runCatching { PenTool.valueOf(prefs.getString("lastInkTool", null) ?: "") }
@@ -272,6 +276,11 @@ class PenSettings(context: Context) {
         persist()
     }
 
+    fun updateZoomSpeed(value: Float) {
+        zoomSpeed = value.coerceIn(0.5f, 2f)
+        persist()
+    }
+
     private fun persist() {
         prefs.edit()
             .putBoolean("collapsed", collapsed)
@@ -286,6 +295,7 @@ class PenSettings(context: Context) {
             .putInt("eraserSelected", eraserSelected)
             .putString("eraserMode", eraserMode.name)
             .putFloat("stabilizer", stabilizer)
+            .putFloat("zoomSpeed", zoomSpeed)
             .putString("lastInkTool", lastInkTool.name)
             .apply()
     }

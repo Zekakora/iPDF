@@ -77,6 +77,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import java.util.Locale
 
 /**
  * Pen dock plus the preset rail / detached preset bubble.
@@ -478,6 +479,43 @@ private fun SettingsPanel(settings: PenSettings, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Zoom speed", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    zoomSpeedLabel(settings.zoomSpeed),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Text(
+                "Controls how much the zoom changes for the same finger movement.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Slider(
+                value = settings.zoomSpeed,
+                onValueChange = { settings.updateZoomSpeed(it) },
+                valueRange = 0.5f..2f,
+                steps = 5
+            )
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Slower",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "Faster",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.height(12.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 Surface(
                     onClick = onDismiss,
@@ -505,6 +543,9 @@ private fun stabilizerLabel(value: Float): String {
         else -> "Strong $percent%"
     }
 }
+
+private fun zoomSpeedLabel(value: Float): String =
+    String.format(Locale.US, "%.2f×", value)
 
 /** Size/colour editor for the currently selected preset (or the eraser size and mode). */
 @Composable
