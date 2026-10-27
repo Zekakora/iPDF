@@ -1,0 +1,27 @@
+# Gradle / Android generated files
+/.gradle/
+/.kotlin/
+/app/build/
+/build/
+
+# IDE settings and local machine configuration
+/.idea/
+*.iml
+local.properties
+
+# Build artifacts
+*.apk
+*.aab
+*.class
+*.dex
+
+# Local SDK dependencies
+/app/libs/*.aar
+/app/libs/*.jar
+
+# Personal course data and raw device captures
+/AAAMasters/
+/device-shots/
+
+# Unused local reference image
+/calander.jpg

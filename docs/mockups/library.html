@@ -1,0 +1,823 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library — design mockup</title>
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --primary: #6750A4;
+    --on-primary: #FFFFFF;
+    --primary-container: #EADDFF;
+    --on-primary-container: #21005D;
+    --secondary-container: #E8DEF8;
+    --on-secondary-container: #1D192B;
+    --surface: #FEF7FF;
+    --surface-low: #F7F2FA;
+    --surface-container: #F3EDF7;
+    --surface-high: #ECE6F0;
+    --surface-variant: #E7E0EC;
+    --on-surface: #1D1B20;
+    --on-surface-variant: #49454F;
+    --outline: #79747E;
+    --outline-variant: #CAC4D0;
+    --lecture: #4F46E5;
+    --exercise: #B45309;
+    --exam: #B3261E;
+    --others: #6B7280;
+  }
+  html, body { margin: 0; }
+  body {
+    background: #E6E0E9;
+    color: var(--on-surface);
+    font-family: "Segoe UI", "Segoe UI Variable Text", "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    align-items: flex-start;
+  }
+  .doc-head { max-width: 1000px; }
+  .doc-head h1 { margin: 0 0 4px; font-size: 22px; font-weight: 650; }
+  .doc-head p { margin: 0; color: var(--on-surface-variant); font-size: 13px; line-height: 1.5; }
+  .caption { font-size: 12.5px; color: #49454F; margin-top: -14px; }
+  .caption b { color: #1D1B20; }
+  body.shot { padding: 20px; gap: 0; }
+  body.shot .doc-head, body.shot .caption { display: none; }
+
+  .board {
+    position: relative;
+    width: 1000px;
+    height: 634px;
+    flex: none;
+    display: flex;
+    background: var(--surface);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 14px 44px rgba(28, 20, 40, .20), 0 2px 6px rgba(28, 20, 40, .10);
+  }
+
+  /* ---------- left pane ---------- */
+  .left {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 16px 20px 0;
+    background: var(--surface);
+  }
+  .head { height: 58px; flex: none; display: flex; align-items: center; gap: 8px; }
+  .titles { margin-right: auto; min-width: 0; padding-right: 8px; }
+  .h1 { font-size: 23px; line-height: 1.1; font-weight: 650; letter-spacing: -.2px; }
+  .sub {
+    margin-top: 3px;
+    font-size: 11.5px;
+    color: var(--on-surface-variant);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .sep { padding: 0 3px; opacity: .55; }
+  .search {
+    width: 196px; height: 38px; flex: none;
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 12px;
+    border-radius: 19px;
+    background: var(--surface-high);
+    color: var(--on-surface-variant);
+    font-size: 12.5px;
+  }
+  .search.off { opacity: .45; }
+  .iconbtn {
+    width: 38px; height: 38px; flex: none;
+    border: 0; border-radius: 50%;
+    background: transparent;
+    color: var(--on-surface-variant);
+    display: flex; align-items: center; justify-content: center;
+    padding: 0;
+  }
+  .iconbtn.accent { background: var(--primary-container); color: var(--on-primary-container); }
+
+  /* ---------- filters ---------- */
+  .frow1 { height: 44px; flex: none; display: flex; align-items: center; gap: 8px; }
+  .frow2 { height: 40px; flex: none; display: flex; align-items: center; gap: 8px; }
+  .pill {
+    height: 34px; flex: none; max-width: 240px;
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 0 11px 0 13px;
+    border-radius: 999px;
+    border: 1px solid var(--outline-variant);
+    background: transparent;
+    color: var(--on-surface);
+    font: inherit; font-size: 12.5px; font-weight: 600;
+    white-space: nowrap;
+  }
+  .pill.sem { max-width: 138px; }
+  .pill .label { overflow: hidden; text-overflow: ellipsis; }
+  .pill.active { border-color: transparent; background: var(--primary-container); color: var(--on-primary-container); }
+  .pill.pressed { background: var(--surface-high); border-color: transparent; }
+  .pill .icon { opacity: .7; }
+  .rescount {
+    margin-left: auto;
+    font-size: 11.5px;
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .reset {
+    height: 34px; flex: none;
+    border: 0; background: transparent;
+    color: var(--primary);
+    font: inherit; font-size: 12.5px; font-weight: 650;
+    padding: 0 8px; border-radius: 9px;
+    visibility: hidden;
+  }
+  .reset.show { visibility: visible; }
+  .typelabel {
+    flex: none;
+    font-size: 11.5px; font-weight: 650;
+    color: var(--on-surface-variant);
+    margin-right: 2px;
+  }
+  .tchip {
+    height: 32px; flex: none;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 0 10px;
+    border-radius: 999px;
+    border: 1px solid var(--outline-variant);
+    background: transparent;
+    color: var(--on-surface);
+    font: inherit; font-size: 12px; font-weight: 600;
+    white-space: nowrap;
+  }
+  .tchip.sel {
+    background: var(--secondary-container);
+    border-color: transparent;
+    color: var(--on-secondary-container);
+    font-weight: 650;
+  }
+  .tchip.off { opacity: .42; }
+  .tchip .tc {
+    font-size: 10.5px; font-weight: 600;
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+  }
+  .tchip.sel .tc { color: var(--on-secondary-container); opacity: .72; }
+
+  .rule {
+    flex: none;
+    height: 1px;
+    margin: 9px 0 0;
+    background: var(--outline-variant);
+    opacity: .75;
+  }
+
+  /* ---------- folder tree ---------- */
+  .tree {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    padding-top: 2px;
+  }
+  .course {
+    height: 40px;
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 8px;
+    border-radius: 10px;
+  }
+  .course:hover { background: var(--surface-container); }
+  .chev { color: var(--on-surface-variant); flex: none; }
+  .chev.collapsed { transform: rotate(-90deg); }
+  .cfolder { color: var(--primary); opacity: .85; }
+  .cname {
+    font-size: 13px; font-weight: 650; letter-spacing: -.05px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .ccount {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+  }
+  .cbody {
+    margin-left: 26px;
+    padding-left: 10px;
+    border-left: 1px solid var(--outline-variant);
+  }
+  .cat {
+    height: 32px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 0 8px 0 2px;
+    border-radius: 8px;
+  }
+  .cat:hover { background: var(--surface-container); }
+  .cat .chev { width: 13px; height: 13px; }
+  .catname { font-size: 12px; font-weight: 650; }
+  .catcount {
+    margin-left: auto;
+    padding-right: 4px;
+    font-size: 10.5px;
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+  }
+  .catbody { margin-left: 14px; }
+  .folder-row {
+    height: 28px;
+    display: flex; align-items: center; gap: 7px;
+    padding: 0 8px 0 2px;
+    border-radius: 8px;
+  }
+  .folder-row:hover { background: var(--surface-container); }
+  .folder-row .chev { width: 12px; height: 12px; }
+  .folder-row .ficon-sm { width: 14px; height: 14px; color: var(--on-surface-variant); opacity: .8; }
+  .foldername {
+    font-size: 11.5px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .foldercount {
+    margin-left: auto;
+    font-size: 10.5px;
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+  }
+  .folderbody { margin-left: 14px; }
+  .file {
+    height: 48px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 8px;
+    border-radius: 10px;
+  }
+  .file:hover { background: var(--surface-container); }
+  .ficon {
+    width: 30px; height: 30px; flex: none;
+    border-radius: 8px;
+    background: var(--surface-container);
+    color: var(--primary);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .filetext { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+  .fname {
+    font-size: 13px; font-weight: 600; letter-spacing: -.05px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .fmeta {
+    font-size: 11px;
+    color: var(--on-surface-variant);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .tdot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .tdot.lecture { background: var(--lecture); }
+  .tdot.exercise { background: var(--exercise); }
+  .tdot.exam { background: var(--exam); }
+  .tdot.others { background: var(--others); }
+
+  /* ---------- right pane ---------- */
+  .right {
+    width: 300px; flex: none;
+    background: var(--surface-low);
+    border-left: 1px solid var(--outline-variant);
+    display: flex; flex-direction: column;
+    padding: 14px 12px 0;
+  }
+  .rhead {
+    height: 44px; flex: none;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 4px 0 6px;
+  }
+  .h2 { font-size: 16px; font-weight: 650; letter-spacing: -.1px; }
+  .clear {
+    border: 0; background: transparent;
+    color: var(--primary);
+    font: inherit; font-size: 11.5px; font-weight: 650;
+    padding: 8px; border-radius: 9px;
+  }
+  .rlist { flex: 1; min-height: 0; overflow: hidden; }
+  .rgroup {
+    padding: 10px 8px 4px;
+    font-size: 10.5px; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase;
+    color: var(--on-surface-variant);
+  }
+  .hrow {
+    width: 100%; height: 54px;
+    display: flex; align-items: flex-start; gap: 9px;
+    padding: 8px;
+    border: 0; border-radius: 10px;
+    background: transparent; color: inherit;
+    text-align: left; font: inherit;
+  }
+  .hrow:hover { background: var(--surface-container); }
+  .hrow .ficon { width: 26px; height: 26px; border-radius: 7px; margin-top: 1px; }
+  .hmain { min-width: 0; flex: 1; }
+  .hline { display: flex; align-items: baseline; gap: 6px; }
+  .hname {
+    font-size: 12.5px; font-weight: 600; line-height: 1.35;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .htime {
+    margin-left: auto; flex: none;
+    font-size: 10px; color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+  }
+  .hmeta {
+    margin-top: 1px;
+    font-size: 10.5px; color: var(--on-surface-variant);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ---------- empty state ---------- */
+  .emptywrap {
+    flex: 1; min-height: 0;
+    display: flex; align-items: center; justify-content: center;
+    padding-bottom: 12px;
+  }
+  .empty { width: 460px; display: flex; flex-direction: column; align-items: center; text-align: center; }
+  .empty .badge {
+    width: 62px; height: 62px; border-radius: 20px;
+    background: var(--primary-container); color: var(--on-primary-container);
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 16px;
+  }
+  .empty h3 { margin: 0 0 8px; font-size: 21px; font-weight: 650; letter-spacing: -.2px; }
+  .empty p {
+    margin: 0 0 18px; max-width: 430px;
+    font-size: 12.5px; line-height: 1.55;
+    color: var(--on-surface-variant);
+  }
+  .btns { display: flex; gap: 10px; }
+  .btn {
+    height: 38px; padding: 0 18px;
+    border-radius: 19px; border: 1px solid transparent;
+    font: inherit; font-size: 12.5px; font-weight: 650;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .btn.filled { background: var(--primary); color: var(--on-primary); }
+  .btn.outlined { border-color: var(--outline); color: var(--primary); background: transparent; }
+  .tree-example {
+    margin-top: 20px; width: 410px; text-align: left;
+    background: var(--surface-container); border-radius: 12px;
+    padding: 12px 16px;
+    font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: 10.5px; line-height: 1.65;
+    color: var(--on-surface-variant);
+  }
+  .tree-example .d { color: var(--primary); }
+  .tree-example .n { color: var(--on-surface); }
+  .hint { margin-top: 10px; font-size: 10.5px; color: #79747E; }
+
+  /* ---------- dropdown menu ---------- */
+  .menu-scrim {
+    position: absolute; left: 0; top: 160px; right: 300px; bottom: 0;
+    z-index: 2; background: rgba(254, 247, 255, .62);
+  }
+  .menu {
+    position: absolute; left: 20px; top: 160px; width: 322px;
+    z-index: 3; padding: 8px;
+    background: var(--surface-container);
+    border: 1px solid var(--outline-variant);
+    border-radius: 14px;
+    box-shadow: 0 12px 32px rgba(28, 20, 40, .20), 0 2px 6px rgba(28, 20, 40, .12);
+  }
+  .mi {
+    width: 100%; height: 40px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 10px;
+    border: 0; border-radius: 9px;
+    background: transparent; color: var(--on-surface);
+    font: inherit; font-size: 12.5px; font-weight: 550;
+    text-align: left;
+  }
+  .mi:hover { background: var(--surface-high); }
+  .mi.sel { background: var(--secondary-container); font-weight: 650; }
+  .mi .check { width: 18px; height: 18px; flex: none; color: var(--primary); opacity: 0; }
+  .mi.sel .check { opacity: 1; }
+  .mi .lbl { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mi .cnt { font-size: 11px; color: var(--on-surface-variant); font-variant-numeric: tabular-nums; }
+
+  svg.icon { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; display: block; }
+  .i18 { width: 18px; height: 18px; }
+  .i16 { width: 16px; height: 16px; }
+  .i14 { width: 14px; height: 14px; }
+  .i13 { width: 13px; height: 13px; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.4"/><path d="m15.3 15.3 4.4 4.4"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.2 12a7.2 7.2 0 1 1-2.1-5.1"/><path d="M19.5 4.9v4.3h-4.3"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.6 7.4c0-1 .8-1.8 1.8-1.8h3.2l1.8 2.1h8.2c1 0 1.8.8 1.8 1.8v8.3c0 1-.8 1.8-1.8 1.8H5.4c-1 0-1.8-.8-1.8-1.8V7.4Z"/></symbol>
+  <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3.6 7.4c0-1 .8-1.8 1.8-1.8h3.2l1.8 2.1h8.2c1 0 1.8.8 1.8 1.8v8.3c0 1-.8 1.8-1.8 1.8H5.4c-1 0-1.8-.8-1.8-1.8V7.4Z"/><path d="M12 11.4v5M9.5 13.9h5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m7.5 9.5 4.5 4.5 4.5-4.5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.6 4.2 4.2L19 7.4"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M6.5 3.4h6.4l4.6 4.6v11.6c0 .6-.5 1-1 1H6.5c-.6 0-1-.4-1-1V4.4c0-.6.4-1 1-1Z"/><path d="M12.8 3.6v4.7h4.6"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+</defs></svg>
+
+<div class="doc-head">
+  <h1>Library — 文件夹树 + 四类筛选</h1>
+  <p>一级目录 = 课程文件夹（学期可前缀或后缀：<code>26ws-HPC</code> / <code>Power Electronics-27ss</code>）。课程内只按二级文件夹名 Lecture / Exercise / Exam / Others 精确归类（其他名字 → Others，并保留原名），更深层级只作为可折叠子文件夹。顶部三个筛选任意组合。</p>
+</div>
+
+<!-- ================= BOARD 1 : DEFAULT ================= -->
+<div class="board" id="board-default">
+  <div class="left">
+    <div class="head">
+      <div class="titles">
+        <div class="h1">Library</div>
+        <div class="sub">AAAMasters <span class="sep">·</span> 10 courses</div>
+      </div>
+      <div class="search"><svg class="icon i16"><use href="#i-search"/></svg><span class="ph">Search files</span></div>
+      <button class="iconbtn" title="Rescan folder"><svg class="icon i18"><use href="#i-refresh"/></svg></button>
+      <button class="iconbtn" title="Change folder"><svg class="icon i18"><use href="#i-folder"/></svg></button>
+      <button class="iconbtn accent" title="Open a single PDF"><svg class="icon i18"><use href="#i-plus"/></svg></button>
+    </div>
+
+    <div class="frow1">
+      <button class="pill"><span class="label">All courses</span><svg class="icon i16"><use href="#i-chev"/></svg></button>
+      <button class="pill sem"><span class="label">All semesters</span><svg class="icon i16"><use href="#i-chev"/></svg></button>
+      <span class="rescount">123 files</span>
+      <button class="reset">Reset</button>
+    </div>
+
+    <div class="frow2">
+      <span class="typelabel">Type</span>
+      <button class="tchip sel"><span>All</span><span class="tc">123</span></button>
+      <button class="tchip"><i class="tdot lecture"></i><span>Lecture</span><span class="tc">29</span></button>
+      <button class="tchip"><i class="tdot exercise"></i><span>Exercise</span><span class="tc">56</span></button>
+      <button class="tchip"><i class="tdot exam"></i><span>Exam</span><span class="tc">2</span></button>
+      <button class="tchip"><i class="tdot others"></i><span>Others</span><span class="tc">36</span></button>
+    </div>
+    <div class="rule"></div>
+
+    <div class="tree">
+      <div class="course">
+        <svg class="icon i14 chev"><use href="#i-chev"/></svg>
+        <svg class="icon i18 cfolder"><use href="#i-folder"/></svg>
+        <span class="cname">26ws-HPC</span>
+        <span class="ccount">4</span>
+      </div>
+      <div class="cbody">
+        <div class="cat"><svg class="icon chev"><use href="#i-chev"/></svg><i class="tdot lecture"></i><span class="catname">Lecture</span><span class="catcount">1</span></div>
+        <div class="catbody">
+          <div class="folder-row"><svg class="icon chev"><use href="#i-chev"/></svg><svg class="icon ficon-sm"><use href="#i-folder"/></svg><span class="foldername">Chapter 1</span><span class="foldercount">1</span></div>
+          <div class="folderbody">
+            <div class="file">
+              <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+              <span class="filetext"><span class="fname">01-Introduction.pdf</span><span class="fmeta">2.8 MB</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="cat"><svg class="icon chev"><use href="#i-chev"/></svg><i class="tdot exercise"></i><span class="catname">Exercise</span><span class="catcount">1</span></div>
+        <div class="catbody">
+          <div class="file">
+            <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+            <span class="filetext"><span class="fname">HPC_Exercise_01.pdf</span><span class="fmeta">1.1 MB</span></span>
+          </div>
+        </div>
+
+        <div class="cat"><svg class="icon chev"><use href="#i-chev"/></svg><i class="tdot exam"></i><span class="catname">Exam</span><span class="catcount">1</span></div>
+        <div class="catbody">
+          <div class="file">
+            <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+            <span class="filetext"><span class="fname">HPC_Exam_2025.pdf</span><span class="fmeta">0.8 MB</span></span>
+          </div>
+        </div>
+
+        <div class="cat"><svg class="icon chev"><use href="#i-chev"/></svg><i class="tdot others"></i><span class="catname">Others</span><span class="catcount">1</span></div>
+        <div class="catbody">
+          <div class="folder-row"><svg class="icon chev"><use href="#i-chev"/></svg><svg class="icon ficon-sm"><use href="#i-folder"/></svg><span class="foldername">Organization</span><span class="foldercount">1</span></div>
+          <div class="folderbody">
+            <div class="file">
+              <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+              <span class="filetext"><span class="fname">00-Organization.pdf</span><span class="fmeta">0.7 MB</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="course">
+        <svg class="icon i14 chev"><use href="#i-chev"/></svg>
+        <svg class="icon i18 cfolder"><use href="#i-folder"/></svg>
+        <span class="cname">Power Electronics-27ss</span>
+        <span class="ccount">13</span>
+      </div>
+      <div class="cbody">
+        <div class="cat"><svg class="icon chev"><use href="#i-chev"/></svg><i class="tdot lecture"></i><span class="catname">Lecture</span><span class="catcount">4</span></div>
+        <div class="catbody">
+          <div class="folder-row"><svg class="icon chev"><use href="#i-chev"/></svg><svg class="icon ficon-sm"><use href="#i-folder"/></svg><span class="foldername">PLECS Simulation Models</span><span class="foldercount">1</span></div>
+          <div class="folderbody">
+            <div class="file">
+              <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+              <span class="filetext"><span class="fname">PLECSExamples.pdf</span><span class="fmeta">0.4 MB</span></span>
+            </div>
+          </div>
+          <div class="file">
+            <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+            <span class="filetext"><span class="fname">2026_10_12_CourseOrganizationAndIntroduction.pdf</span><span class="fmeta">2.2 MB</span></span>
+          </div>
+          <div class="file">
+            <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+            <span class="filetext"><span class="fname">2026-10-12_Converter Analysis.pdf</span><span class="fmeta">2.8 MB</span></span>
+          </div>
+          <div class="file">
+            <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+            <span class="filetext"><span class="fname">2026-10-19_Converter Topologies and Operation.pdf</span><span class="fmeta">2.7 MB</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="rhead"><div class="h2">History</div><button class="clear">Clear</button></div>
+    <div class="rlist">
+      <div class="rgroup">Today</div>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">01-Introduction.pdf</span><span class="htime">18:42</span></span>
+          <span class="hmeta">HPC · Lecture</span>
+        </span>
+      </button>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">BSS_3_E2.1_Lithium.pdf</span><span class="htime">16:05</span></span>
+          <span class="hmeta">Battery Storage Systems · Lecture</span>
+        </span>
+      </button>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">Eng_BSS_E5_Modelling.pdf</span><span class="htime">11:20</span></span>
+          <span class="hmeta">Battery Storage Systems · Exercise</span>
+        </span>
+      </button>
+
+      <div class="rgroup">Yesterday</div>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">FPGA Lab Script.pdf</span><span class="htime">17:20</span></span>
+          <span class="hmeta">FPGA Design · Others</span>
+        </span>
+      </button>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">2026 CAR-F chap intro.pdf</span><span class="htime">09:15</span></span>
+          <span class="hmeta">Computer Arithmetic · Lecture</span>
+        </span>
+      </button>
+
+      <div class="rgroup">Earlier</div>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">Spektrum Deutsch B1+ - Kurs- und Arbeitsbuch.pdf</span><span class="htime">Oct 21</span></span>
+          <span class="hmeta">Deutschkurs · Others</span>
+        </span>
+      </button>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">2026-10-12_Converter Analysis.pdf</span><span class="htime">Oct 19</span></span>
+          <span class="hmeta">Power Electronics · Lecture</span>
+        </span>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="caption"><b>1 · 默认</b> — 课程按文件夹名分组；展开后按 Lecture / Exercise / Exam / Others 归类，文件保留子文件夹路径。顶部筛选组任意组合。</div>
+
+<!-- ================= BOARD 2 : FILTERED ================= -->
+<div class="board" id="board-filtered">
+  <div class="left">
+    <div class="head">
+      <div class="titles">
+        <div class="h1">Library</div>
+        <div class="sub">AAAMasters <span class="sep">·</span> 10 courses</div>
+      </div>
+      <div class="search"><svg class="icon i16"><use href="#i-search"/></svg><span class="ph">Search files</span></div>
+      <button class="iconbtn" title="Rescan folder"><svg class="icon i18"><use href="#i-refresh"/></svg></button>
+      <button class="iconbtn" title="Change folder"><svg class="icon i18"><use href="#i-folder"/></svg></button>
+      <button class="iconbtn accent" title="Open a single PDF"><svg class="icon i18"><use href="#i-plus"/></svg></button>
+    </div>
+
+    <div class="frow1">
+      <button class="pill active"><span class="label">Power Electronics</span><svg class="icon i16"><use href="#i-chev"/></svg></button>
+      <button class="pill sem active"><span class="label">27ss</span><svg class="icon i16"><use href="#i-chev"/></svg></button>
+      <span class="rescount">4 of 123</span>
+      <button class="reset show">Reset</button>
+    </div>
+
+    <div class="frow2">
+      <span class="typelabel">Type</span>
+      <button class="tchip"><span>All</span><span class="tc">13</span></button>
+      <button class="tchip sel"><i class="tdot lecture"></i><span>Lecture</span><span class="tc">4</span></button>
+      <button class="tchip"><i class="tdot exercise"></i><span>Exercise</span><span class="tc">9</span></button>
+      <button class="tchip off"><i class="tdot exam"></i><span>Exam</span><span class="tc">0</span></button>
+      <button class="tchip off"><i class="tdot others"></i><span>Others</span><span class="tc">0</span></button>
+    </div>
+    <div class="rule"></div>
+
+    <div class="tree">
+      <div class="course">
+        <svg class="icon i14 chev"><use href="#i-chev"/></svg>
+        <svg class="icon i18 cfolder"><use href="#i-folder"/></svg>
+        <span class="cname">Power Electronics-27ss</span>
+        <span class="ccount">4</span>
+      </div>
+      <div class="cbody">
+        <div class="cat"><svg class="icon chev"><use href="#i-chev"/></svg><i class="tdot lecture"></i><span class="catname">Lecture</span><span class="catcount">4</span></div>
+        <div class="catbody">
+          <div class="folder-row"><svg class="icon chev"><use href="#i-chev"/></svg><svg class="icon ficon-sm"><use href="#i-folder"/></svg><span class="foldername">PLECS Simulation Models</span><span class="foldercount">1</span></div>
+          <div class="folderbody">
+            <div class="file">
+              <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+              <span class="filetext"><span class="fname">PLECSExamples.pdf</span><span class="fmeta">0.4 MB</span></span>
+            </div>
+          </div>
+          <div class="file">
+            <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+            <span class="filetext"><span class="fname">2026_10_12_CourseOrganizationAndIntroduction.pdf</span><span class="fmeta">2.2 MB</span></span>
+          </div>
+          <div class="file">
+            <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+            <span class="filetext"><span class="fname">2026-10-12_Converter Analysis.pdf</span><span class="fmeta">2.8 MB</span></span>
+          </div>
+          <div class="file">
+            <span class="ficon"><svg class="icon i16"><use href="#i-file"/></svg></span>
+            <span class="filetext"><span class="fname">2026-10-19_Converter Topologies and Operation.pdf</span><span class="fmeta">2.7 MB</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="rhead"><div class="h2">History</div><button class="clear">Clear</button></div>
+    <div class="rlist">
+      <div class="rgroup">Today</div>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">2026-10-12_Converter Analysis.pdf</span><span class="htime">18:42</span></span>
+          <span class="hmeta">Power Electronics · Lecture</span>
+        </span>
+      </button>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">BSS_3_E2.1_Lithium.pdf</span><span class="htime">16:05</span></span>
+          <span class="hmeta">Battery Storage Systems · Lecture</span>
+        </span>
+      </button>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">Eng_BSS_E5_Modelling.pdf</span><span class="htime">11:20</span></span>
+          <span class="hmeta">Battery Storage Systems · Exercise</span>
+        </span>
+      </button>
+
+      <div class="rgroup">Yesterday</div>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">FPGA Lab Script.pdf</span><span class="htime">17:20</span></span>
+          <span class="hmeta">FPGA Design · Others</span>
+        </span>
+      </button>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">2026 CAR-F chap intro.pdf</span><span class="htime">09:15</span></span>
+          <span class="hmeta">Computer Arithmetic · Lecture</span>
+        </span>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="caption"><b>2 · 组合筛选</b> — 课程 Power Electronics + 类型 Lecture + 学期 27ss。Lecture 下 <code>PLECS Simulation Models</code> 里的 PDF 也归入 Lecture。</div>
+
+<!-- ================= BOARD 3 : EMPTY ================= -->
+<div class="board" id="board-empty">
+  <div class="left">
+    <div class="head">
+      <div class="titles">
+        <div class="h1">Library</div>
+        <div class="sub">No folder selected</div>
+      </div>
+      <div class="search off"><svg class="icon i16"><use href="#i-search"/></svg><span class="ph">Search files</span></div>
+      <button class="iconbtn accent" title="Choose a folder"><svg class="icon i18"><use href="#i-folder-plus"/></svg></button>
+      <button class="iconbtn" title="Open a single PDF"><svg class="icon i18"><use href="#i-plus"/></svg></button>
+    </div>
+
+    <div class="emptywrap">
+      <div class="empty">
+        <div class="badge"><svg class="icon" style="width:28px;height:28px"><use href="#i-folder-plus"/></svg></div>
+        <h3>Build your library</h3>
+        <p>Pick the folder that holds your courses. Each top-level folder is one course; the semester can be a prefix or suffix (<b>26ws-HPC</b>, <b>Power Electronics-27ss</b>).</p>
+        <div class="btns">
+          <button class="btn filled"><svg class="icon i16"><use href="#i-folder-plus"/></svg>Choose folder</button>
+          <button class="btn outlined"><svg class="icon i16"><use href="#i-plus"/></svg>Open a PDF</button>
+        </div>
+        <div class="tree-example">
+<span class="d">AAAMasters/</span><br>
+&nbsp;&nbsp;<span class="d">26ws-HPC/</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="d">Lecture/</span>&nbsp;&nbsp;&nbsp;<span class="n">all levels below count as Lecture</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="d">Chapter 1/</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="d">Exercise/</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="d">Exam/</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="d">Others/</span><br>
+&nbsp;&nbsp;<span class="d">Power Electronics-27ss/</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="d">Lecture/</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="d">PLECS Simulation Models/</span>
+        </div>
+        <div class="hint">Files stay on this device. Import only remembers the folder and its PDF index.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="rhead"><div class="h2">History</div><button class="clear">Clear</button></div>
+    <div class="rlist">
+      <div class="rgroup">Today</div>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">Nexys_A7_Reference_Manual.pdf</span><span class="htime">18:42</span></span>
+          <span class="hmeta">Single file</span>
+        </span>
+      </button>
+      <div class="rgroup">Yesterday</div>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">Vokabelliste K7-K12.pdf</span><span class="htime">17:20</span></span>
+          <span class="hmeta">Single file</span>
+        </span>
+      </button>
+      <div class="rgroup">Earlier</div>
+      <button class="hrow">
+        <span class="ficon"><svg class="icon i13"><use href="#i-file"/></svg></span>
+        <span class="hmain">
+          <span class="hline"><span class="hname">ST2_Cheatsheet.pdf</span><span class="htime">Oct 18</span></span>
+          <span class="hmeta">Single file</span>
+        </span>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="caption"><b>3 · 首次使用</b> — 左侧给出目录结构示例；`Lecture` 下的所有子文件夹都归入 Lecture。右侧历史独立于文件夹。</div>
+
+<!-- ================= BOARD 4 : COURSE MENU ================= -->
+<div class="board" id="board-menu">
+  <div class="left"></div>
+  <div class="right"></div>
+  <div class="menu-scrim"></div>
+  <div class="menu">
+    <button class="mi sel"><span class="check"><svg class="icon i18"><use href="#i-check"/></svg></span><span class="lbl">All courses</span><span class="cnt">123</span></button>
+    <button class="mi"><span class="check"><svg class="icon i18"><use href="#i-check"/></svg></span><span class="lbl">Battery Storage Systems</span><span class="cnt">14</span></button>
+    <button class="mi"><span class="check"><svg class="icon i18"><use href="#i-check"/></svg></span><span class="lbl">Computer Arithmetic - Fundamentals</span><span class="cnt">3</span></button>
+    <button class="mi"><span class="check"><svg class="icon i18"><use href="#i-check"/></svg></span><span class="lbl">Deutschkurs</span><span class="cnt">3</span></button>
+    <button class="mi"><span class="check"><svg class="icon i18"><use href="#i-check"/></svg></span><span class="lbl">FPGA Design</span><span class="cnt">8</span></button>
+    <button class="mi"><span class="check"><svg class="icon i18"><use href="#i-check"/></svg></span><span class="lbl">HPC Winter</span><span class="cnt">4</span></button>
+    <button class="mi"><span class="check"><svg class="icon i18"><use href="#i-check"/></svg></span><span class="lbl">Microprocessor architecturer</span><span class="cnt">5</span></button>
+    <button class="mi"><span class="check"><svg class="icon i18"><use href="#i-check"/></svg></span><span class="lbl">Power Electronics</span><span class="cnt">13</span></button>
+    <button class="mi"><span class="check"><svg class="icon i18"><use href="#i-check"/></svg></span><span class="lbl">Systemtheorie 2</span><span class="cnt">30</span></button>
+    <button class="mi"><span class="check"><svg class="icon i18"><use href="#i-check"/></svg></span><span class="lbl">Theoretische Informationstechnik 1</span><span class="cnt">37</span></button>
+    <button class="mi"><span class="check"><svg class="icon i18"><use href="#i-check"/></svg></span><span class="lbl">VLSI - Fundamentals</span><span class="cnt">6</span></button>
+  </div>
+</div>
+<div class="caption"><b>4 · 课程下拉</b> — 每门课的匹配数量按当前类型/学期条件计算；这里显示的是基名（学期在课程文件夹名里）。</div>
+
+<script>
+  (function () {
+    var df = document.getElementById('board-default');
+    var mb = document.getElementById('board-menu');
+    if (df && mb) {
+      mb.querySelector('.left').innerHTML = df.querySelector('.left').innerHTML;
+      mb.querySelector('.right').innerHTML = df.querySelector('.right').innerHTML;
+      var trigger = mb.querySelector('.frow1 .pill');
+      if (trigger) trigger.classList.add('pressed');
+    }
+  })();
+</script>
+<script>
+  (function () {
+    var params = new URLSearchParams(location.search);
+    var state = params.get('state');
+    if (!state) return;
+    document.body.classList.add('shot');
+    document.querySelectorAll('.board').forEach(function (b) { b.style.display = 'none'; });
+    var board = document.getElementById('board-' + state);
+    if (board) board.style.display = 'flex';
+  })();
+</script>
+</body>
+</html>
