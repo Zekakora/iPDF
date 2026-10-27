@@ -10,7 +10,6 @@ import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.PDResources
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
-import com.tom_roush.pdfbox.pdmodel.graphics.blend.BlendMode
 import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
 import com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAppearanceStream
 import java.io.File
@@ -21,8 +20,8 @@ import kotlin.math.roundToInt
 /**
  * Writes the in-memory strokes into the PDF as standard /Ink annotations.
  *
- * Every annotation also gets an /AP appearance stream (lines with the right colour, alpha and
- * blend mode) because desktop readers such as Acrobat, Chrome and Edge use it directly; Android's
+ * Every annotation also gets an /AP appearance stream (lines with the right colour) because desktop
+ * readers such as Acrobat, Chrome and Edge use it directly; Android's
  * PdfRenderer ignores ink annotations entirely, so this app keeps drawing its own overlay.
  */
 object PdfInkExporter {
@@ -177,9 +176,6 @@ object PdfInkExporter {
 
         val alpha = (Color.alpha(stroke.color) / 255f).coerceIn(0f, 1f)
         annot.setFloat(COSName.getPDFName("CA"), alpha)
-        if (stroke.highlighter) {
-            annot.setItem(COSName.getPDFName("BM"), COSName.getPDFName("Multiply"))
-        }
 
         val border = COSArray()
         border.add(COSFloat(0f))
@@ -192,7 +188,7 @@ object PdfInkExporter {
         borderStyle.setFloat(COSName.getPDFName("W"), stroke.width.coerceIn(0.3f, 40f))
         annot.setItem(COSName.getPDFName("BS"), borderStyle)
 
-        annot.setItem(COSName.AP, buildAppearance(document, stroke, pdfPoints, left, bottom, right, top, alpha))
+        annot.setItem(COSName.AP, buildAppearance(document, stroke, pdfPoints, left, bottom, right, top))
         return annot
     }
 
@@ -203,8 +199,7 @@ object PdfInkExporter {
         left: Float,
         bottom: Float,
         right: Float,
-        top: Float,
-        alpha: Float
+        top: Float
     ): COSDictionary {
         val width = max(right - left, 0.5f)
         val height = max(top - bottom, 0.5f)
@@ -213,9 +208,10 @@ object PdfInkExporter {
         appearance.setBBox(PDRectangle(0f, 0f, width, height))
         val resources = PDResources()
         val state = PDExtendedGraphicsState()
-        state.setStrokingAlphaConstant(alpha)
-        state.setNonStrokingAlphaConstant(alpha)
-        if (stroke.highlighter) state.setBlendMode(BlendMode.MULTIPLY)
+        // /CA on the annotation is the portable opacity field. Keep the appearance stream opaque
+        // so compliant readers do not multiply the same alpha twice while compositing /AP.
+        state.setStrokingAlphaConstant(1f)
+        state.setNonStrokingAlphaConstant(1f)
         resources.put(COSName.getPDFName("GS0"), state)
         appearance.setResources(resources)
 
@@ -323,7 +319,9 @@ object PdfInkImporter {
             Color.BLACK
         }
         val blendMode = dict.getNameAsString(COSName.getPDFName("BM"))
-        val highlighter = blendMode == "Multiply"
+        val subject = dict.getString(COSName.getPDFName("Subj")).orEmpty()
+        // Accept both the legacy Multiply marker and the portable subject marker written now.
+        val highlighter = blendMode == "Multiply" || subject.equals("Highlight", ignoreCase = true)
 
         val style = dict.getDictionaryObject(COSName.getPDFName("BS")) as? COSDictionary
         val width = style?.getFloat(COSName.getPDFName("W")) ?: 2f

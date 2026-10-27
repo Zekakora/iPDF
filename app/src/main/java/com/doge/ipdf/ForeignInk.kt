@@ -208,8 +208,11 @@ object ForeignInkReader {
         return width.coerceIn(0.3f, 40f)
     }
 
-    private fun isMultiply(dict: COSDictionary): Boolean =
-        dict.getNameAsString(COSName.getPDFName("BM")) == "Multiply"
+    private fun isMultiply(dict: COSDictionary): Boolean {
+        val blendMode = dict.getNameAsString(COSName.getPDFName("BM"))
+        val subject = dict.getString(COSName.getPDFName("Subj")).orEmpty()
+        return blendMode == "Multiply" || subject.equals("Highlight", ignoreCase = true)
+    }
 
     private fun channel(value: Float): Int = (value.coerceIn(0f, 1f) * 255f).roundToInt()
 }

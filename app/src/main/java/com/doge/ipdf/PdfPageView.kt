@@ -8,8 +8,6 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.os.ParcelFileDescriptor
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
 import android.graphics.pdf.PdfRenderer
 import android.os.SystemClock
@@ -246,8 +244,6 @@ class PdfPageView(context: Context) : View(context) {
         color = 0xFF2563EB.toInt()
         strokeWidth = 1.2f
     }
-    private val multiply = PorterDuffXfermode(PorterDuff.Mode.MULTIPLY)
-
     private var liveStroke: Stroke? = null
     private var eraserX = Float.NaN
     private var eraserY = Float.NaN
@@ -1097,7 +1093,9 @@ class PdfPageView(context: Context) : View(context) {
         val pressure = if (stroke.highlighter) 1f else 0.7f + 0.45f * stroke.averagePressure()
         inkPaint.strokeWidth = (stroke.width * pressure).coerceAtLeast(0.4f)
         inkPaint.color = stroke.color
-        inkPaint.xfermode = if (stroke.highlighter) multiply else null
+        // Keep screen rendering in normal source-over mode. Multiply makes translucent highlight
+        // colours look muddy over dark text and is not consistently implemented by PDF viewers.
+        inkPaint.xfermode = null
         if (stroke.points.size == 1) {
             val point = stroke.points[0]
             inkPaint.style = Paint.Style.FILL
