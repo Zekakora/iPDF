@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.os.ParcelFileDescriptor
@@ -25,7 +26,8 @@ import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
-import kotlin.math.roundToInt
+import kotlin.math.ceil
+import kotlin.math.floor
 
 /**
  * Single surface that renders the PDF pages, owns vertical scrolling/flinging, horizontal panning,
@@ -41,6 +43,7 @@ class PdfPageView(context: Context) : View(context) {
     companion object {
         private const val MIN_ZOOM = 0.5f
         private const val MAX_ZOOM = 4f
+        private const val TILE_SIZE_PX = 768
         private const val PAGE_GAP_PT = 10f
         private const val VIEWPORT_REPORT_MS = 250L
         private const val PALM_WINDOW_MS = 280L
@@ -100,17 +103,25 @@ class PdfPageView(context: Context) : View(context) {
     private var renderer: PdfRenderer? = null
     private val sizes = ArrayList<PageSize>()
 
-    // Page bitmaps are expensive to render (30-80 ms for a large page). Keep PdfRenderer work off
-    // the UI thread and draw a white placeholder until the bitmap is ready, so opening, switching
-    // and scrolling never block a frame.
+    // PDF pages are rendered as visible tiles. Keep PdfRenderer work off the UI thread and draw a
+    // white placeholder until a tile is ready, so opening, switching and scrolling never block a
+    // frame. A tile is rendered at the nearest power-of-two zoom level and then lightly scaled for
+    // intermediate pinch values; crossing a bucket requests a new, sharper set of tiles.
     private val renderExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "ipdf-page-render").apply { isDaemon = true }
     }
     private val renderLock = Any()
     @Volatile
     private var renderGeneration = 0
-    private val pendingRenders = HashSet<Int>()
-    private val failedRenders = HashSet<Int>()
+    private data class TileKey(
+        val page: Int,
+        val x: Int,
+        val y: Int,
+        val zoomBucket: Float,
+    )
+
+    private val pendingTiles = HashSet<TileKey>()
+    private val failedTiles = HashSet<TileKey>()
 
     private var zoom = 1f
     private var scrollY = 0f
@@ -119,8 +130,8 @@ class PdfPageView(context: Context) : View(context) {
     private var pendingRestore: Viewport? = null
 
     private val maxCacheKb = (Runtime.getRuntime().maxMemory() / 1024L / 8L).toInt().coerceAtLeast(16 * 1024)
-    private val pageCache = object : LruCache<Int, Bitmap>(maxCacheKb) {
-        override fun sizeOf(key: Int, value: Bitmap): Int = value.byteCount / 1024
+    private val tileCache = object : LruCache<TileKey, Bitmap>(maxCacheKb) {
+        override fun sizeOf(key: TileKey, value: Bitmap): Int = value.byteCount / 1024
     }
 
     private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
@@ -274,9 +285,9 @@ class PdfPageView(context: Context) : View(context) {
 
     fun closeDocument() {
         reportViewport()
-        pageCache.evictAll()
-        pendingRenders.clear()
-        failedRenders.clear()
+        tileCache.evictAll()
+        pendingTiles.clear()
+        failedTiles.clear()
         renderGeneration++
         val oldRenderer = renderer
         val oldDescriptor = descriptor
@@ -433,44 +444,101 @@ class PdfPageView(context: Context) : View(context) {
             val top = pageTopPt(index) * scale - scrollY + topInset
             if (top > height || top + drawHeight < topInset) continue
             val left = (width - drawWidth) / 2f + panX
-            val bitmap = bitmapFor(index)
-            if (bitmap != null) {
-                canvas.drawBitmap(bitmap, null, RectF(left, top, left + drawWidth, top + drawHeight), pagePaint)
-            } else {
-                pagePaint.color = Color.WHITE
-                canvas.drawRect(left, top, left + drawWidth, top + drawHeight, pagePaint)
-            }
+            drawPageTiles(canvas, index, left, top, drawWidth, drawHeight, scale)
             drawInk(canvas, index, left, top, drawWidth, drawHeight, scale)
         }
         canvas.restore()
     }
 
-    private fun bitmapFor(index: Int): Bitmap? {
-        pageCache.get(index)?.let { return it }
-        if (index !in failedRenders) requestRender(index)
-        return null
+    private fun renderZoomBucket(): Float = when {
+        zoom < 0.707f -> 0.5f
+        zoom < 1.414f -> 1f
+        zoom < 2.828f -> 2f
+        else -> 4f
     }
 
-    private fun requestRender(index: Int) {
-        if (index !in sizes.indices) return
-        if (!pendingRenders.add(index)) return
+    private fun drawPageTiles(
+        canvas: Canvas,
+        pageIndex: Int,
+        left: Float,
+        top: Float,
+        drawWidth: Float,
+        drawHeight: Float,
+        currentScale: Float,
+    ) {
+        pagePaint.color = Color.WHITE
+        canvas.drawRect(left, top, left + drawWidth, top + drawHeight, pagePaint)
+
+        val bucket = renderZoomBucket()
+        val tileScale = density * bucket
+        val tilePageSize = TILE_SIZE_PX / tileScale
+        val page = sizes[pageIndex]
+
+        val visibleLeft = ((-left) / currentScale).coerceAtLeast(0f)
+        val visibleRight = ((width - left) / currentScale).coerceAtMost(page.width)
+        val visibleTop = ((topInset - top) / currentScale).coerceAtLeast(0f)
+        val visibleBottom = ((height - top) / currentScale).coerceAtMost(page.height)
+        if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) return
+
+        val firstX = floor(visibleLeft / tilePageSize).toInt().coerceAtLeast(0)
+        val lastX = floor((visibleRight - 0.001f) / tilePageSize).toInt()
+        val firstY = floor(visibleTop / tilePageSize).toInt().coerceAtLeast(0)
+        val lastY = floor((visibleBottom - 0.001f) / tilePageSize).toInt()
+
+        for (tileY in firstY..lastY) {
+            for (tileX in firstX..lastX) {
+                val key = TileKey(pageIndex, tileX, tileY, bucket)
+                val tileLeftPt = tileX * tilePageSize
+                val tileTopPt = tileY * tilePageSize
+                val tileWidthPt = (page.width - tileLeftPt).coerceAtMost(tilePageSize)
+                val tileHeightPt = (page.height - tileTopPt).coerceAtMost(tilePageSize)
+                if (tileWidthPt <= 0f || tileHeightPt <= 0f) continue
+
+                val tileLeft = left + tileLeftPt * currentScale
+                val tileTop = top + tileTopPt * currentScale
+                val tileRight = tileLeft + tileWidthPt * currentScale
+                val tileBottom = tileTop + tileHeightPt * currentScale
+                val bitmap = tileCache.get(key)
+                if (bitmap != null) {
+                    canvas.drawBitmap(bitmap, null, RectF(tileLeft, tileTop, tileRight, tileBottom), pagePaint)
+                } else if (key !in failedTiles) {
+                    requestTile(key)
+                }
+            }
+        }
+    }
+
+    private fun requestTile(key: TileKey) {
+        if (key.page !in sizes.indices) return
+        if (!pendingTiles.add(key)) return
         val pdf = renderer
         if (pdf == null || renderExecutor.isShutdown) {
-            pendingRenders.remove(index)
+            pendingTiles.remove(key)
             return
         }
         val generation = renderGeneration
-        val size = sizes[index]
         renderExecutor.execute {
             val bitmap = synchronized(renderLock) {
                 if (generation != renderGeneration || renderer !== pdf) return@synchronized null
                 try {
-                    pdf.openPage(index).use { page ->
-                        val width = max(1, (size.width * density).roundToInt())
-                        val height = max(1, (size.height * density).roundToInt())
+                    val size = sizes[key.page]
+                    val tileScale = density * key.zoomBucket
+                    val tilePageSize = TILE_SIZE_PX / tileScale
+                    val leftPt = key.x * tilePageSize
+                    val topPt = key.y * tilePageSize
+                    val widthPt = (size.width - leftPt).coerceAtMost(tilePageSize)
+                    val heightPt = (size.height - topPt).coerceAtMost(tilePageSize)
+                    if (widthPt <= 0f || heightPt <= 0f) return@synchronized null
+                    val width = max(1, ceil(widthPt * tileScale).toInt())
+                    val height = max(1, ceil(heightPt * tileScale).toInt())
+                    pdf.openPage(key.page).use { page ->
                         val value = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                         value.eraseColor(Color.WHITE)
-                        page.render(value, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        val transform = Matrix().apply {
+                            setScale(tileScale, tileScale)
+                            postTranslate(-leftPt * tileScale, -topPt * tileScale)
+                        }
+                        page.render(value, null, transform, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                         value
                     }
                 } catch (_: Throwable) {
@@ -478,11 +546,11 @@ class PdfPageView(context: Context) : View(context) {
                 }
             }
             post {
-                pendingRenders.remove(index)
+                pendingTiles.remove(key)
                 if (bitmap == null) {
-                    if (generation == renderGeneration) failedRenders.add(index)
+                    if (generation == renderGeneration) failedTiles.add(key)
                 } else if (generation == renderGeneration && renderer === pdf) {
-                    pageCache.put(index, bitmap)
+                    tileCache.put(key, bitmap)
                 }
                 invalidate()
             }
