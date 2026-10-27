@@ -124,6 +124,8 @@ class PdfPageView(context: Context) : View(context) {
     private val failedTiles = HashSet<TileKey>()
 
     private var zoom = 1f
+    private var pinching = false
+    private var pinchRenderBucket = 1f
     private var scrollY = 0f
     private var panX = 0f
     private var topInset = 0
@@ -210,6 +212,8 @@ class PdfPageView(context: Context) : View(context) {
         override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
             abortFling()
             dragMode = DragMode.PINCH
+            pinching = true
+            pinchRenderBucket = renderZoomBucket()
             return true
         }
 
@@ -221,7 +225,9 @@ class PdfPageView(context: Context) : View(context) {
         }
 
         override fun onScaleEnd(detector: ScaleGestureDetector) {
+            pinching = false
             scheduleViewportReport()
+            invalidate()
         }
     })
 
@@ -261,6 +267,7 @@ class PdfPageView(context: Context) : View(context) {
         renderer = pdf
         openedFile = source
         zoom = 1f
+        pinching = false
         scrollY = 0f
         panX = 0f
         if (cachedSizes.size == pdf.pageCount) {
@@ -470,7 +477,7 @@ class PdfPageView(context: Context) : View(context) {
         pagePaint.color = Color.WHITE
         canvas.drawRect(left, top, left + drawWidth, top + drawHeight, pagePaint)
 
-        val bucket = renderZoomBucket()
+        val bucket = if (pinching) pinchRenderBucket else renderZoomBucket()
         val tileScale = density * bucket
         val tilePageSize = TILE_SIZE_PX / tileScale
         val page = sizes[pageIndex]
@@ -502,10 +509,88 @@ class PdfPageView(context: Context) : View(context) {
                 val bitmap = tileCache.get(key)
                 if (bitmap != null) {
                     canvas.drawBitmap(bitmap, null, RectF(tileLeft, tileTop, tileRight, tileBottom), pagePaint)
-                } else if (key !in failedTiles) {
-                    requestTile(key)
+                } else {
+                    drawFallbackTiles(
+                        canvas = canvas,
+                        pageIndex = pageIndex,
+                        pageLeft = left,
+                        pageTop = top,
+                        currentScale = currentScale,
+                        targetLeftPt = tileLeftPt,
+                        targetTopPt = tileTopPt,
+                        targetRightPt = tileLeftPt + tileWidthPt,
+                        targetBottomPt = tileTopPt + tileHeightPt,
+                        targetLeft = tileLeft,
+                        targetTop = tileTop,
+                        targetRight = tileRight,
+                        targetBottom = tileBottom,
+                        targetBucket = bucket,
+                    )
+                    if (key !in failedTiles) requestTile(key)
                 }
             }
+        }
+    }
+
+    /**
+     * Keeps the previous zoom bucket visible while the sharper bucket is rendered. The page-space
+     * tile grids differ by bucket, so fallback tiles are found by their overlapping page rectangle
+     * instead of reusing the same tile coordinates.
+     */
+    private fun drawFallbackTiles(
+        canvas: Canvas,
+        pageIndex: Int,
+        pageLeft: Float,
+        pageTop: Float,
+        currentScale: Float,
+        targetLeftPt: Float,
+        targetTopPt: Float,
+        targetRightPt: Float,
+        targetBottomPt: Float,
+        targetLeft: Float,
+        targetTop: Float,
+        targetRight: Float,
+        targetBottom: Float,
+        targetBucket: Float,
+    ) {
+        val fallbackBuckets = when (targetBucket) {
+            0.5f -> floatArrayOf(1f, 2f, 4f, 8f)
+            1f -> floatArrayOf(2f, 0.5f, 4f, 8f)
+            2f -> floatArrayOf(1f, 4f, 0.5f, 8f)
+            4f -> floatArrayOf(2f, 8f, 1f, 0.5f)
+            else -> floatArrayOf(4f, 2f, 1f, 0.5f)
+        }
+        val targetClip = RectF(targetLeft, targetTop, targetRight, targetBottom)
+        for (fallbackBucket in fallbackBuckets) {
+            val fallbackTilePageSize = TILE_SIZE_PX / (density * fallbackBucket)
+            val firstX = floor(targetLeftPt / fallbackTilePageSize).toInt().coerceAtLeast(0)
+            val lastX = floor((targetRightPt - 0.001f) / fallbackTilePageSize).toInt()
+            val firstY = floor(targetTopPt / fallbackTilePageSize).toInt().coerceAtLeast(0)
+            val lastY = floor((targetBottomPt - 0.001f) / fallbackTilePageSize).toInt()
+            var drew = false
+
+            canvas.save()
+            canvas.clipRect(targetClip)
+            for (tileY in firstY..lastY) {
+                for (tileX in firstX..lastX) {
+                    val key = TileKey(pageIndex, tileX, tileY, fallbackBucket)
+                    val bitmap = tileCache.get(key) ?: continue
+                    val tileLeftPt = tileX * fallbackTilePageSize
+                    val tileTopPt = tileY * fallbackTilePageSize
+                    val page = sizes[pageIndex]
+                    val tileWidthPt = (page.width - tileLeftPt).coerceAtMost(fallbackTilePageSize)
+                    val tileHeightPt = (page.height - tileTopPt).coerceAtMost(fallbackTilePageSize)
+                    if (tileWidthPt <= 0f || tileHeightPt <= 0f) continue
+                    val tileLeft = pageLeft + tileLeftPt * currentScale
+                    val tileTop = pageTop + tileTopPt * currentScale
+                    val tileRight = tileLeft + tileWidthPt * currentScale
+                    val tileBottom = tileTop + tileHeightPt * currentScale
+                    canvas.drawBitmap(bitmap, null, RectF(tileLeft, tileTop, tileRight, tileBottom), pagePaint)
+                    drew = true
+                }
+            }
+            canvas.restore()
+            if (drew) return
         }
     }
 
