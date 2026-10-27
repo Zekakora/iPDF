@@ -155,16 +155,6 @@ private fun ScrollbarRail(
 
         Box(
             modifier = Modifier
-                .align(Alignment.Center)
-                .fillMaxHeight()
-                .width(4.dp)
-                .background(
-                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.58f),
-                    RoundedCornerShape(4.dp),
-                ),
-        )
-        Box(
-            modifier = Modifier
                 .align(Alignment.TopCenter)
                 .offset { IntOffset(0, thumbOffset) }
                 .width(18.dp)

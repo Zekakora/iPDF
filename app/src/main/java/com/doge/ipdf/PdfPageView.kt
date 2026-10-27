@@ -1700,7 +1700,7 @@ class PdfPageView(context: Context) : View(context) {
             emitScrollbarState()
             scheduleViewportReport()
             postInvalidateOnAnimation()
-        } else if (manualScrollStartPage >= 0) {
+        } else if (manualScrollStartPage >= 0 && activePointerId == MotionEvent.INVALID_POINTER_ID) {
             revealScrollbarAfterPageCrossing()
             manualScrollStartPage = -1
             scheduleScrollbarHide()
