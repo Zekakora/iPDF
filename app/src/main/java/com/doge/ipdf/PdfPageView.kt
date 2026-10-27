@@ -22,7 +22,10 @@ import android.view.ViewConfiguration
 import android.widget.OverScroller
 import java.io.File
 import java.util.UUID
-import java.util.concurrent.Executors
+import java.util.concurrent.PriorityBlockingQueue
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
@@ -30,6 +33,7 @@ import kotlin.math.ceil
 import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.ln
+import kotlin.math.roundToInt
 
 /**
  * Single surface that renders the PDF pages, owns vertical scrolling/flinging, horizontal panning,
@@ -45,10 +49,23 @@ class PdfPageView(context: Context) : View(context) {
     companion object {
         private const val MIN_ZOOM = 0.5f
         private const val MAX_ZOOM = 8f
-        private const val TILE_SIZE_PX = 768
+        private const val TILE_SIZE_PX = 512
+        private const val BASE_MAX_DIM_PX = 1280
         private const val PAGE_GAP_PT = 10f
         private const val VIEWPORT_REPORT_MS = 250L
         private const val PALM_WINDOW_MS = 280L
+
+        /**
+         * Tiles are requested from the draw pass, but only a few per frame: the renderer is a single
+         * PDF thread, so queueing a whole screen at once only makes every tile arrive later. Tiles
+         * that are no longer visible when their turn comes are skipped instead of rendered.
+         */
+        private const val MAX_TILE_REQUESTS_PER_FRAME = 6
+        private const val MAX_PENDING_TILES = 32
+        private const val PRIORITY_BASE = 0
+        private const val PRIORITY_TILE = 1
+
+        private const val BASE_CACHE_PAGES = 3
     }
 
     var onViewportChanged: ((Viewport) -> Unit)? = null
@@ -105,13 +122,32 @@ class PdfPageView(context: Context) : View(context) {
     private var renderer: PdfRenderer? = null
     private val sizes = ArrayList<PageSize>()
 
-    // PDF pages are rendered as visible tiles. Keep PdfRenderer work off the UI thread and draw a
-    // white placeholder until a tile is ready, so opening, switching and scrolling never block a
-    // frame. A tile is rendered at the nearest power-of-two zoom level and then lightly scaled for
-    // intermediate pinch values; crossing a bucket requests a new, sharper set of tiles.
-    private val renderExecutor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "ipdf-page-render").apply { isDaemon = true }
+    // PDF pages are rendered in two layers. A coarse full-page "base" bitmap is drawn first, so a
+    // zoom change, a pan or a slow render can never expose the bare white page; visible tiles are
+    // painted on top and progressively sharpen it. A tile is rendered at the nearest power-of-two
+    // zoom bucket and then lightly scaled for intermediate pinch values.
+    private class RenderTask(val priority: Int, private val block: () -> Unit) : Runnable {
+        override fun run() = block()
     }
+
+    private fun renderPriority(task: Runnable): Int =
+        (task as? RenderTask)?.priority ?: PRIORITY_TILE
+
+    // Base renders jump ahead of queued tile renders: showing a soft page quickly matters more than
+    // finishing an off-screen tile.
+    private val renderExecutor = ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        PriorityBlockingQueue(
+            16,
+            Comparator<Runnable> { first, second ->
+                renderPriority(first).compareTo(renderPriority(second))
+            },
+        ),
+        ThreadFactory { runnable -> Thread(runnable, "ipdf-page-render").apply { isDaemon = true } },
+    )
     private val renderLock = Any()
     @Volatile
     private var renderGeneration = 0
@@ -122,8 +158,26 @@ class PdfPageView(context: Context) : View(context) {
         val zoomBucket: Float,
     )
 
+    private class TileRequest(val key: TileKey, val distanceSq: Float)
+
+    /** Result of a background render; [skipped] means the work became unnecessary, not that it failed. */
+    private class RenderResult(val bitmap: Bitmap?, val skipped: Boolean = false)
+
     private val pendingTiles = HashSet<TileKey>()
     private val failedTiles = HashSet<TileKey>()
+
+    // One coarse full-page bitmap per recently visible page. It lives outside the tile LRU so cache
+    // pressure can never evict the layer that guarantees full page coverage.
+    private val baseCache = LruCache<Int, Bitmap>(BASE_CACHE_PAGES)
+    private val pendingBases = HashSet<Int>()
+    private val failedBases = HashSet<Int>()
+
+    /**
+     * Tiles wanted by the current frame. A render task whose tile is no longer in this set is
+     * dropped without rendering, so a fast pan cannot leave a long useless queue behind.
+     */
+    @Volatile
+    private var wantedTiles: Set<TileKey> = emptySet()
 
     private var zoom = 1f
     var zoomSpeed: Float = 1f
@@ -136,12 +190,20 @@ class PdfPageView(context: Context) : View(context) {
         }
     private var pinching = false
     private var pinchRenderBucket = 1f
+    private var rejectFingerGesture = false
+    private var rejectMultiTouch = false
+    private var pinchCandidate = false
+    private var firstFingerDownAt = 0L
     private var scrollY = 0f
     private var panX = 0f
     private var topInset = 0
     private var pendingRestore: Viewport? = null
 
-    private val maxCacheKb = (Runtime.getRuntime().maxMemory() / 1024L / 8L).toInt().coerceAtLeast(16 * 1024)
+    // A 512 px ARGB tile is 1 MiB, so a quarter of the heap keeps ~2.5 screens of tiles on a
+    // 256 MiB device. The old eighth-of-heap budget could only hold ~14 tiles of the old 768 px
+    // tiles (2.25 MiB each), barely one screen, which made every bucket change evict its fallback.
+    private val maxCacheKb = (Runtime.getRuntime().maxMemory() / 1024L / 4L).toInt()
+        .coerceIn(24 * 1024, 96 * 1024)
     private val tileCache = object : LruCache<TileKey, Bitmap>(maxCacheKb) {
         override fun sizeOf(key: TileKey, value: Bitmap): Int = value.byteCount / 1024
     }
@@ -220,6 +282,7 @@ class PdfPageView(context: Context) : View(context) {
     private val velocity = VelocityTracker.obtain()
     private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+            if (!pinchCandidate) return false
             abortFling()
             dragMode = DragMode.PINCH
             pinching = true
@@ -296,6 +359,10 @@ class PdfPageView(context: Context) : View(context) {
                 // Keep whatever pages could be measured; rendering will show placeholders.
             }
         }
+        if (sizes.isNotEmpty()) {
+            // Start the coarse page before the first layout pass so the first frame is not white.
+            requestBase((restore?.page ?: 0).coerceIn(0, sizes.lastIndex))
+        }
         pendingRestore = restore
         requestLayout()
         invalidate()
@@ -305,8 +372,12 @@ class PdfPageView(context: Context) : View(context) {
     fun closeDocument() {
         reportViewport()
         tileCache.evictAll()
+        baseCache.evictAll()
         pendingTiles.clear()
         failedTiles.clear()
+        pendingBases.clear()
+        failedBases.clear()
+        wantedTiles = emptySet()
         renderGeneration++
         val oldRenderer = renderer
         val oldDescriptor = descriptor
@@ -324,13 +395,11 @@ class PdfPageView(context: Context) : View(context) {
         pendingRestore = null
         invalidate()
         if (oldRenderer != null || oldDescriptor != null) {
-            // Close behind any in-flight render; the generation check makes its result harmless.
-            runCatching {
-                renderExecutor.execute {
-                    synchronized(renderLock) {
-                        runCatching { oldRenderer?.close() }
-                        runCatching { oldDescriptor?.close() }
-                    }
+            // Close ahead of any queued tile; the generation check makes their results harmless.
+            submitRender(PRIORITY_BASE) {
+                synchronized(renderLock) {
+                    runCatching { oldRenderer?.close() }
+                    runCatching { oldDescriptor?.close() }
                 }
             }
         }
@@ -452,10 +521,18 @@ class PdfPageView(context: Context) : View(context) {
         canvas.drawColor(Color.rgb(31, 33, 38))
 
         if (sizes.isEmpty()) {
+            wantedTiles = emptySet()
             canvas.restore()
             return
         }
 
+        // Freeze the tile pyramid while a pinch is in progress. Zooming out enlarges the visible
+        // area quadratically, so chasing it with new high-resolution tiles used to flood the single
+        // render thread, evict every cached fallback and leave white holes on screen. The page base
+        // layer keeps the document visible until the gesture ends, then sharp tiles are requested.
+        val bucket = if (pinching) pinchRenderBucket else renderZoomBucket()
+        val wanted = HashSet<TileKey>()
+        val missing = ArrayList<TileRequest>()
         for (index in sizes.indices) {
             val size = sizes[index]
             val drawWidth = size.width * scale
@@ -463,9 +540,11 @@ class PdfPageView(context: Context) : View(context) {
             val top = pageTopPt(index) * scale - scrollY + topInset
             if (top > height || top + drawHeight < topInset) continue
             val left = (width - drawWidth) / 2f + panX
-            drawPageTiles(canvas, index, left, top, drawWidth, drawHeight, scale)
+            drawPageTiles(canvas, index, left, top, drawWidth, drawHeight, scale, bucket, wanted, missing)
             drawInk(canvas, index, left, top, drawWidth, drawHeight, scale)
         }
+        wantedTiles = if (pinching) emptySet() else wanted
+        if (!pinching) requestMissingTiles(missing)
         canvas.restore()
     }
 
@@ -485,11 +564,22 @@ class PdfPageView(context: Context) : View(context) {
         drawWidth: Float,
         drawHeight: Float,
         currentScale: Float,
+        bucket: Float,
+        wanted: MutableSet<TileKey>,
+        missing: MutableList<TileRequest>,
     ) {
         pagePaint.color = Color.WHITE
         canvas.drawRect(left, top, left + drawWidth, top + drawHeight, pagePaint)
 
-        val bucket = if (pinching) pinchRenderBucket else renderZoomBucket()
+        // The base layer has already been rendered at a fixed, modest resolution. It is what turns
+        // a missing tile from a white block into a temporarily soft but readable patch.
+        val base = baseCache.get(pageIndex)
+        if (base != null) {
+            canvas.drawBitmap(base, null, RectF(left, top, left + drawWidth, top + drawHeight), pagePaint)
+        } else {
+            requestBase(pageIndex)
+        }
+
         val tileScale = density * bucket
         val tilePageSize = TILE_SIZE_PX / tileScale
         val page = sizes[pageIndex]
@@ -505,6 +595,9 @@ class PdfPageView(context: Context) : View(context) {
         val firstY = floor(visibleTop / tilePageSize).toInt().coerceAtLeast(0)
         val lastY = floor((visibleBottom - 0.001f) / tilePageSize).toInt()
 
+        val viewportCenterX = width * 0.5f
+        val viewportCenterY = height * 0.5f
+
         for (tileY in firstY..lastY) {
             for (tileX in firstX..lastX) {
                 val key = TileKey(pageIndex, tileX, tileY, bucket)
@@ -518,29 +611,57 @@ class PdfPageView(context: Context) : View(context) {
                 val tileTop = top + tileTopPt * currentScale
                 val tileRight = tileLeft + tileWidthPt * currentScale
                 val tileBottom = tileTop + tileHeightPt * currentScale
+                wanted.add(key)
+
                 val bitmap = tileCache.get(key)
                 if (bitmap != null) {
                     canvas.drawBitmap(bitmap, null, RectF(tileLeft, tileTop, tileRight, tileBottom), pagePaint)
                 } else {
-                    drawFallbackTiles(
-                        canvas = canvas,
-                        pageIndex = pageIndex,
-                        pageLeft = left,
-                        pageTop = top,
-                        currentScale = currentScale,
-                        targetLeftPt = tileLeftPt,
-                        targetTopPt = tileTopPt,
-                        targetRightPt = tileLeftPt + tileWidthPt,
-                        targetBottomPt = tileTopPt + tileHeightPt,
-                        targetLeft = tileLeft,
-                        targetTop = tileTop,
-                        targetRight = tileRight,
-                        targetBottom = tileBottom,
-                        targetBucket = bucket,
-                    )
-                    if (key !in failedTiles) requestTile(key)
+                    // Any older bucket still in the cache improves on the base layer; it is never
+                    // the only content on screen, so partial coverage is harmless now.
+                    if (!pinching) {
+                        drawFallbackTiles(
+                            canvas = canvas,
+                            pageIndex = pageIndex,
+                            pageLeft = left,
+                            pageTop = top,
+                            currentScale = currentScale,
+                            targetLeftPt = tileLeftPt,
+                            targetTopPt = tileTopPt,
+                            targetRightPt = tileLeftPt + tileWidthPt,
+                            targetBottomPt = tileTopPt + tileHeightPt,
+                            targetLeft = tileLeft,
+                            targetTop = tileTop,
+                            targetRight = tileRight,
+                            targetBottom = tileBottom,
+                            targetBucket = bucket,
+                        )
+                        if (key !in failedTiles) {
+                            val centerX = (tileLeft + tileRight) * 0.5f
+                            val centerY = (tileTop + tileBottom) * 0.5f
+                            val dx = centerX - viewportCenterX
+                            val dy = centerY - viewportCenterY
+                            missing.add(TileRequest(key, dx * dx + dy * dy))
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    /**
+     * Requests only the most useful missing tiles for this frame: nearest to the viewport center
+     * first, a few at a time. Further tiles are requested as earlier ones arrive, which keeps the
+     * single PDF render thread focused on what the user is actually looking at.
+     */
+    private fun requestMissingTiles(missing: MutableList<TileRequest>) {
+        if (missing.isEmpty()) return
+        missing.sortBy { it.distanceSq }
+        var budget = MAX_TILE_REQUESTS_PER_FRAME
+        for (request in missing) {
+            if (budget <= 0) break
+            if (pendingTiles.size >= MAX_PENDING_TILES) break
+            if (requestTile(request.key)) budget--
         }
     }
 
@@ -606,52 +727,123 @@ class PdfPageView(context: Context) : View(context) {
         }
     }
 
-    private fun requestTile(key: TileKey) {
-        if (key.page !in sizes.indices) return
-        if (!pendingTiles.add(key)) return
+    private fun requestTile(key: TileKey): Boolean {
+        if (key.page !in sizes.indices) return false
+        if (key in failedTiles) return false
+        if (!pendingTiles.add(key)) return false
         val pdf = renderer
         if (pdf == null || renderExecutor.isShutdown) {
             pendingTiles.remove(key)
-            return
+            return false
         }
         val generation = renderGeneration
-        renderExecutor.execute {
-            val bitmap = synchronized(renderLock) {
-                if (generation != renderGeneration || renderer !== pdf) return@synchronized null
-                try {
-                    val size = sizes[key.page]
-                    val tileScale = density * key.zoomBucket
-                    val tilePageSize = TILE_SIZE_PX / tileScale
-                    val leftPt = key.x * tilePageSize
-                    val topPt = key.y * tilePageSize
-                    val widthPt = (size.width - leftPt).coerceAtMost(tilePageSize)
-                    val heightPt = (size.height - topPt).coerceAtMost(tilePageSize)
-                    if (widthPt <= 0f || heightPt <= 0f) return@synchronized null
-                    val width = max(1, ceil(widthPt * tileScale).toInt())
-                    val height = max(1, ceil(heightPt * tileScale).toInt())
-                    pdf.openPage(key.page).use { page ->
-                        val value = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                        value.eraseColor(Color.WHITE)
-                        val transform = Matrix().apply {
-                            setScale(tileScale, tileScale)
-                            postTranslate(-leftPt * tileScale, -topPt * tileScale)
+        submitRender(PRIORITY_TILE) {
+            val result = synchronized(renderLock) {
+                if (generation != renderGeneration || renderer !== pdf || key !in wantedTiles) {
+                    // Panning/zooming moved on while this task was queued: skip it instead of
+                    // spending 20-40 ms on a tile that nobody will see.
+                    RenderResult(bitmap = null, skipped = true)
+                } else {
+                    try {
+                        val size = sizes[key.page]
+                        val tileScale = density * key.zoomBucket
+                        val tilePageSize = TILE_SIZE_PX / tileScale
+                        val leftPt = key.x * tilePageSize
+                        val topPt = key.y * tilePageSize
+                        val widthPt = (size.width - leftPt).coerceAtMost(tilePageSize)
+                        val heightPt = (size.height - topPt).coerceAtMost(tilePageSize)
+                        if (widthPt <= 0f || heightPt <= 0f) {
+                            RenderResult(bitmap = null, skipped = true)
+                        } else {
+                            val width = max(1, ceil(widthPt * tileScale).toInt())
+                            val height = max(1, ceil(heightPt * tileScale).toInt())
+                            pdf.openPage(key.page).use { page ->
+                                val value = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                                value.eraseColor(Color.WHITE)
+                                val transform = Matrix().apply {
+                                    setScale(tileScale, tileScale)
+                                    postTranslate(-leftPt * tileScale, -topPt * tileScale)
+                                }
+                                page.render(value, null, transform, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                RenderResult(value)
+                            }
                         }
-                        page.render(value, null, transform, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                        value
+                    } catch (_: Throwable) {
+                        RenderResult(bitmap = null)
                     }
-                } catch (_: Throwable) {
-                    null
                 }
             }
             post {
                 pendingTiles.remove(key)
-                if (bitmap == null) {
-                    if (generation == renderGeneration) failedTiles.add(key)
-                } else if (generation == renderGeneration && renderer === pdf) {
-                    tileCache.put(key, bitmap)
+                val bitmap = result.bitmap
+                if (bitmap != null) {
+                    if (generation == renderGeneration && renderer === pdf) tileCache.put(key, bitmap)
+                } else if (!result.skipped && generation == renderGeneration) {
+                    failedTiles.add(key)
                 }
                 invalidate()
             }
+        }
+        return true
+    }
+
+    /**
+     * Renders the coarse whole-page layer. It is deliberately small (1280 px on the long edge) and
+     * kept outside the tile cache so it can always cover the page while sharp tiles are missing.
+     */
+    private fun requestBase(pageIndex: Int) {
+        if (pageIndex !in sizes.indices) return
+        if (pageIndex in failedBases) return
+        if (!pendingBases.add(pageIndex)) return
+        val pdf = renderer
+        if (pdf == null || renderExecutor.isShutdown) {
+            pendingBases.remove(pageIndex)
+            return
+        }
+        val generation = renderGeneration
+        val size = sizes[pageIndex]
+        submitRender(PRIORITY_BASE) {
+            val result = synchronized(renderLock) {
+                if (generation != renderGeneration || renderer !== pdf) {
+                    RenderResult(bitmap = null, skipped = true)
+                } else {
+                    try {
+                        val baseScale = (BASE_MAX_DIM_PX / max(size.width, size.height)).coerceAtLeast(0.01f)
+                        val width = max(1, (size.width * baseScale).roundToInt())
+                        val height = max(1, (size.height * baseScale).roundToInt())
+                        val value = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        value.eraseColor(Color.WHITE)
+                        pdf.openPage(pageIndex).use { page ->
+                            val transform = Matrix().apply {
+                                setScale(width / size.width, height / size.height)
+                            }
+                            page.render(value, null, transform, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        }
+                        RenderResult(value)
+                    } catch (_: Throwable) {
+                        RenderResult(bitmap = null)
+                    }
+                }
+            }
+            post {
+                pendingBases.remove(pageIndex)
+                val bitmap = result.bitmap
+                if (bitmap != null) {
+                    if (generation == renderGeneration && renderer === pdf) baseCache.put(pageIndex, bitmap)
+                } else if (!result.skipped && generation == renderGeneration) {
+                    failedBases.add(pageIndex)
+                }
+                invalidate()
+            }
+        }
+    }
+
+    private fun submitRender(priority: Int, block: () -> Unit) {
+        if (renderExecutor.isShutdown) return
+        try {
+            renderExecutor.execute(RenderTask(priority, block))
+        } catch (_: Throwable) {
+            // The executor can be shut down between the check and the submission.
         }
     }
 
@@ -929,11 +1121,59 @@ class PdfPageView(context: Context) : View(context) {
             handleStylus(event)
             return true
         }
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            firstFingerDownAt = event.eventTime
+            rejectFingerGesture = isPalmLike(event, 0)
+            rejectMultiTouch = rejectFingerGesture
+            pinchCandidate = false
+        }
+        if (rejectFingerGesture) {
+            if (event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_CANCEL
+            ) {
+                resetTouchGuard()
+            }
+            return true
+        }
         if (liveStroke != null || erasing || lassoPoints != null) {
             // The pen owns the gesture; palm and finger contacts are ignored until it lifts.
             return true
         }
         return handleFinger(event)
+    }
+
+    private fun resetTouchGuard() {
+        rejectFingerGesture = false
+        rejectMultiTouch = false
+        pinchCandidate = false
+        firstFingerDownAt = 0L
+    }
+
+    private fun isPalmLike(event: MotionEvent, index: Int): Boolean {
+        if (index !in 0 until event.pointerCount) return true
+        val tool = event.getToolType(index)
+        if (tool != MotionEvent.TOOL_TYPE_FINGER) return false
+
+        // Some tablet drivers expose a palm as an oversized finger instead of a dedicated tool
+        // type, so use the contact geometry as the portable palm-rejection signal.
+        val major = event.getTouchMajor(index)
+        val minor = event.getTouchMinor(index)
+        val size = event.getSize(index)
+        return size >= 0.76f ||
+            major >= 72f * density ||
+            minor >= 54f * density
+    }
+
+    private fun canStartPinch(event: MotionEvent): Boolean {
+        if (event.pointerCount != 2) return false
+        if (firstFingerDownAt == 0L || event.eventTime - firstFingerDownAt > 420L) return false
+        if (isPalmLike(event, 0) || isPalmLike(event, 1)) return false
+        if (event.getToolType(0) != MotionEvent.TOOL_TYPE_FINGER ||
+            event.getToolType(1) != MotionEvent.TOOL_TYPE_FINGER
+        ) return false
+        val dx = event.getX(1) - event.getX(0)
+        val dy = event.getY(1) - event.getY(0)
+        return hypot(dx, dy) >= 28f * density
     }
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
@@ -1174,7 +1414,22 @@ class PdfPageView(context: Context) : View(context) {
                 return true
             }
         }
+
+        if (event.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
+            pinchCandidate = canStartPinch(event)
+            rejectMultiTouch = !pinchCandidate
+            if (rejectMultiTouch) dragMode = DragMode.NONE
+        }
         scaleDetector.onTouchEvent(event)
+        if (rejectMultiTouch) {
+            if (event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_CANCEL
+            ) {
+                resetTouchGuard()
+                dragMode = DragMode.NONE
+            }
+            return true
+        }
         if (dragMode == DragMode.PINCH) {
             if (event.actionMasked == MotionEvent.ACTION_POINTER_UP) {
                 // Continue with the finger that is still down, without a positional jump.
@@ -1212,7 +1467,7 @@ class PdfPageView(context: Context) : View(context) {
 
             MotionEvent.ACTION_POINTER_DOWN -> {
                 abortFling()
-                dragMode = DragMode.PINCH
+                if (pinchCandidate) dragMode = DragMode.PINCH
             }
 
             MotionEvent.ACTION_MOVE -> {
@@ -1266,12 +1521,14 @@ class PdfPageView(context: Context) : View(context) {
                 if (tap) handleTap(x, y, event.eventTime)
                 activePointerId = MotionEvent.INVALID_POINTER_ID
                 dragMode = DragMode.NONE
+                resetTouchGuard()
                 reportViewport()
             }
 
             MotionEvent.ACTION_CANCEL -> {
                 activePointerId = MotionEvent.INVALID_POINTER_ID
                 dragMode = DragMode.NONE
+                resetTouchGuard()
                 reportViewport()
             }
         }
