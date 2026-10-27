@@ -131,12 +131,14 @@ fun PenDock(
                         dampingRatio = Spring.DampingRatioMediumBouncy,
                         stiffness = Spring.StiffnessMedium,
                     ),
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
                 ),
                 exit = fadeOut() + scaleOut(
                     animationSpec = spring(
                         dampingRatio = Spring.DampingRatioNoBouncy,
                         stiffness = Spring.StiffnessMedium,
                     ),
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
                 ),
             ) {
                 Surface(
@@ -162,12 +164,14 @@ fun PenDock(
                         dampingRatio = Spring.DampingRatioMediumBouncy,
                         stiffness = Spring.StiffnessMedium,
                     ),
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
                 ),
                 exit = fadeOut() + scaleOut(
                     animationSpec = spring(
                         dampingRatio = Spring.DampingRatioNoBouncy,
                         stiffness = Spring.StiffnessMedium,
                     ),
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f),
                 ),
             ) {
                 Surface(
