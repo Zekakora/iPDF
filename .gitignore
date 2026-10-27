@@ -12,6 +12,7 @@ local.properties
 # Build artifacts
 *.apk
 *.aab
+*.idsig
 *.class
 *.dex
 
