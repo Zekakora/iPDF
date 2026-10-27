@@ -289,6 +289,17 @@ private fun ReaderApp(
     }
 
     MaterialTheme(colorScheme = theme.scheme) {
+        SideEffect {
+            val activity = context.findActivity()
+            val dark = theme.scheme.background.red < 0.5f
+            activity?.window?.statusBarColor = theme.scheme.background.toArgb()
+            activity?.window?.navigationBarColor = theme.scheme.background.toArgb()
+            activity?.window?.decorView?.systemUiVisibility = if (dark) {
+                0
+            } else {
+                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+            }
+        }
         Surface(modifier = Modifier.fillMaxSize()) {
             Box(
                 modifier = Modifier
