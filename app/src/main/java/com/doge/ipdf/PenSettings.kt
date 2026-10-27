@@ -73,6 +73,7 @@ class PenSettings(context: Context) {
     )
         private set
     private var lastStylusToggleAt = 0L
+    private var lastStylusButtonAt = 0L
 
     /** When true the preset swatches live in their own draggable horizontal bubble. */
     var floatingPresets by mutableStateOf(prefs.getBoolean("floatingPresets", false))
@@ -170,6 +171,26 @@ class PenSettings(context: Context) {
             selectTool(restore)
         } else {
             selectTool(PenTool.ERASER)
+        }
+    }
+
+    /** Single press toggles eraser; a quick second press toggles lasso and the previous ink tool. */
+    fun handleStylusButtonPress() {
+        val now = android.os.SystemClock.uptimeMillis()
+        val doublePress = now - lastStylusButtonAt in 80L..450L
+        lastStylusButtonAt = if (doublePress) 0L else now
+        if (doublePress) {
+            toggleLassoFromStylus()
+        } else {
+            toggleEraserFromStylus()
+        }
+    }
+
+    fun toggleLassoFromStylus() {
+        if (tool == PenTool.LASSO) {
+            selectTool(lastInkTool.takeIf { it == PenTool.PEN || it == PenTool.HIGHLIGHTER } ?: PenTool.PEN)
+        } else {
+            selectTool(PenTool.LASSO)
         }
     }
 

@@ -129,10 +129,10 @@ class MainActivity : ComponentActivity() {
         android.util.Log.i("PenButton", "touch-film function=$function")
         when (function) {
             // "Switch between brush and eraser" and "switch to previous brush" both drive the
-            // pen/eraser toggle so whichever gesture the pen is configured with does what the
-            // user asked for: press the button to erase, press again to return to the last pen.
+            // single-press path. A quick second button press is interpreted by PenSettings as the
+            // lasso shortcut.
             MiuiTouchFilm.switchBrushAndEraser,
-            MiuiTouchFilm.switchToPreviousBrush -> penSettings.toggleEraserFromStylus()
+            MiuiTouchFilm.switchToPreviousBrush -> penSettings.handleStylusButtonPress()
         }
     }
 
@@ -161,7 +161,7 @@ class MainActivity : ComponentActivity() {
         if (isPenButton) {
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                 android.util.Log.i("PenButton", "raw key=${event.keyCode} device=${event.deviceId}")
-                penSettings.toggleEraserFromStylus()
+                penSettings.handleStylusButtonPress()
             }
             return true
         }
@@ -546,7 +546,7 @@ private fun ReaderScreen(
                             this.zoomSpeed = zoomSpeed
                             this.scrollSpeed = scrollSpeed
                             onViewportChanged = { session.onViewportChanged(it) }
-                            onStylusButton = { penSettings.toggleEraserFromStylus() }
+                            onStylusButton = { penSettings.handleStylusButtonPress() }
                             onAutoMarker = {
                                 penSettings.selectTool(PenTool.PEN)
                                 penSettings.selectPreset(0)
