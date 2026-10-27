@@ -594,7 +594,10 @@ class PdfPageView(context: Context) : View(context) {
         if (sizes.isEmpty()) return
         abortFling()
         val page = pageIndex.coerceIn(0, sizes.lastIndex)
-        scrollY = (pageTopPt(page) * scale() - topInset).coerceIn(0f, maxScroll())
+        // scrollY is measured in document coordinates. The top inset is only applied while
+        // drawing the page below the reader bar; subtracting it here leaves the viewport in the
+        // previous page, so entering 52 used to land/read as page 51.
+        scrollY = (pageTopPt(page) * scale()).coerceIn(0f, maxScroll())
         scrollbarVisible = maxScroll() > 0.5f
         emitScrollbarState()
         scheduleScrollbarHide()
