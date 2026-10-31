@@ -33,7 +33,6 @@ class ScheduleStore(context: Context) {
     private val settingsFile = File(dir, "settings.json")
     private val cacheFile = File(dir, "calendar.ics")
     private val todosFile = File(dir, "todos.json")
-    private val writeLock = Any()
 
     fun loadSettings(): ScheduleSettings {
         if (!settingsFile.isFile) return ScheduleSettings()
@@ -85,6 +84,17 @@ class ScheduleStore(context: Context) {
     fun clearCachedCalendar() {
         synchronized(writeLock) {
             if (cacheFile.exists()) cacheFile.delete()
+        }
+    }
+
+    /**
+     * Removes only the downloaded feed and a crash-left atomic-write temp. Settings and todo data
+     * live in sibling files and are deliberately untouched.
+     */
+    internal fun clearCache(stats: CacheCleanupStats) {
+        synchronized(writeLock) {
+            deleteTracked(cacheFile, stats)
+            deleteTracked(File(dir, "calendar.ics.tmp"), stats)
         }
     }
 
@@ -195,5 +205,11 @@ class ScheduleStore(context: Context) {
 
     private companion object {
         const val MAX_FEED_CHARS = 8_000_000
+
+        /**
+         * Shared by every ScheduleStore instance in the process so the hidden cache cleaner cannot
+         * delete calendar.ics while the schedule view model is replacing it.
+         */
+        val writeLock = Any()
     }
 }

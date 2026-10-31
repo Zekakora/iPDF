@@ -70,6 +70,12 @@ object PdfInkExporter {
         return count
     }
 
+    /**
+     * Absolute ink width limits. The upper bound is generous because brush widths are
+     * page-relative: a preset that looks right on A4 legitimately becomes wider on a large slide.
+     */
+    private fun inkWidthPt(width: Float): Float = width.coerceIn(0.3f, 120f)
+
     private fun annotationsOf(page: PDPage): COSArray {
         val existing = page.cosObject.getDictionaryObject(COSName.ANNOTS) as? COSArray
         if (existing != null) return existing
@@ -185,7 +191,8 @@ object PdfInkExporter {
 
         val borderStyle = COSDictionary()
         borderStyle.setName(COSName.getPDFName("S"), "S")
-        borderStyle.setFloat(COSName.getPDFName("W"), stroke.width.coerceIn(0.3f, 40f))
+        // Brush widths are page-relative, so a wide slide can legitimately need a wider ink line.
+        borderStyle.setFloat(COSName.getPDFName("W"), inkWidthPt(stroke.width))
         annot.setItem(COSName.getPDFName("BS"), borderStyle)
 
         annot.setItem(COSName.AP, buildAppearance(document, stroke, pdfPoints, left, bottom, right, top))
@@ -218,7 +225,7 @@ object PdfInkExporter {
         val red = Color.red(stroke.color) / 255f
         val green = Color.green(stroke.color) / 255f
         val blue = Color.blue(stroke.color) / 255f
-        val lineWidth = stroke.width.coerceIn(0.3f, 40f)
+        val lineWidth = inkWidthPt(stroke.width)
 
         PDPageContentStream(document, appearance).use { content ->
             content.saveGraphicsState()
@@ -284,12 +291,18 @@ object PdfInkImporter {
             for (i in 0 until annots.size()) {
                 val dict = annots.getObject(i) as? COSDictionary ?: continue
                 if (!PdfInkExporter.isOurInk(dict)) continue
-                toStroke(dict, index, pageHeight)?.let { strokes.add(it) }
+                toStroke(dict, index, pageHeight, page.mediaBox.width)?.let { strokes.add(it) }
             }
         }
     }
 
-    internal fun toStroke(dict: COSDictionary, page: Int, pageHeight: Float): Stroke? {
+    internal fun toStroke(
+        dict: COSDictionary,
+        page: Int,
+        pageHeight: Float,
+        pageWidth: Float = pageHeight,
+    ): Stroke? {
+        val pageLongEdgePt = max(pageWidth, pageHeight)
         val inkList = dict.getDictionaryObject(COSName.getPDFName("InkList")) as? COSArray
             ?: return null
         val points = ArrayList<InkPoint>()
@@ -331,12 +344,15 @@ object PdfInkImporter {
         val id = annotationName.removePrefix(PdfInkExporter.NAME_PREFIX)
             .ifBlank { java.util.UUID.randomUUID().toString() }
 
+        // The annotation stores absolute points; derive the page-relative width back from it.
+        val widthPt = width.coerceIn(0.3f, 120f)
         return Stroke(
             id = id,
             page = page,
             color = color,
-            width = width.coerceIn(0.3f, 40f),
-            highlighter = highlighter
+            width = widthPt,
+            highlighter = highlighter,
+            baseWidth = widthPt * REFERENCE_PAGE_LONG_EDGE_PT / pageLongEdgePt.coerceAtLeast(1f),
         ).also { it.points.addAll(points) }
     }
 

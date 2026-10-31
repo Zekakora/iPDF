@@ -31,21 +31,46 @@ data class Viewport(val page: Int, val offsetPt: Float, val zoom: Float) {
 
 data class PageSize(val width: Float, val height: Float)
 
+/** The reference page long edge whose brush widths have always been stored in PDF points. */
+const val REFERENCE_PAGE_LONG_EDGE_PT = 840f
+
+/**
+ * Converts a preset width, stored relative to [REFERENCE_PAGE_LONG_EDGE_PT], into the PDF points
+ * of one concrete page, so the same preset looks identical on an A4 sheet and on a wide slide.
+ */
+fun brushWidthToPagePt(presetWidth: Float, pageLongEdgePt: Float): Float =
+    presetWidth * pageLongEdgePt.coerceAtLeast(1f) / REFERENCE_PAGE_LONG_EDGE_PT
+
 /** A point of a stroke, in PDF points with the origin at the page's top-left corner. */
 data class InkPoint(val x: Float, val y: Float, val pressure: Float = 1f)
 
 /**
  * One pen stroke. Points are stored in page space (PDF points, top-left origin) so the stroke
  * survives zooming, scrolling and rotation, and can be written to a standard PDF /Ink annotation.
+ *
+ * [width] is the *rendered* width in PDF points of its own page and is derived from [baseWidth],
+ * a page-size independent value. Keeping the two separate lets a brush keep the same relative size
+ * on every page: a stroke already drawn keeps its look, only new strokes pick up a new page size.
  */
 class Stroke(
     val id: String,
     val page: Int,
     val color: Int,
     var width: Float,
-    val highlighter: Boolean,
-    val points: MutableList<InkPoint> = ArrayList()
+    var highlighter: Boolean,
+    val points: MutableList<InkPoint> = ArrayList(),
+    baseWidth: Float = width
 ) {
+    /** Page-independent width; [width] is always this scaled to the page's long edge. */
+    var baseWidth: Float = baseWidth
+        private set
+
+    /** Replaces the page-independent width and recomputes [width] for the page. */
+    fun setBaseWidth(value: Float, pageLongEdgePt: Float) {
+        baseWidth = value
+        width = brushWidthToPagePt(value, pageLongEdgePt)
+    }
+
     private val bounds = RectF()
     private var boundsDirty = true
     private val inkPath = Path()
@@ -65,7 +90,8 @@ class Stroke(
         page = page,
         color = color,
         width = width,
-        highlighter = highlighter
+        highlighter = highlighter,
+        baseWidth = baseWidth,
     ).also { it.points.addAll(newPoints) }
 
     fun replacePoints(newPoints: List<InkPoint>) {
@@ -198,6 +224,7 @@ class Stroke(
             .put("page", page)
             .put("color", color)
             .put("width", round(width))
+            .put("bw", round(baseWidth))
             .put("hl", highlighter)
             .put("pts", pts)
     }
@@ -205,16 +232,28 @@ class Stroke(
     companion object {
         private fun round(value: Float): Double = (Math.round(value * 100f) / 100.0)
 
-        fun fromJson(obj: JSONObject): Stroke? {
+        /**
+         * Journals written before brush widths became page-relative only stored the point width;
+         * [legacyBaseWidth] turns that into the equivalent relative width so the stroke keeps its
+         * appearance on the page it was drawn on.
+         */
+        fun fromJson(obj: JSONObject, legacyBaseWidth: Float? = null): Stroke? {
             return try {
                 val pts = obj.getJSONArray("pts")
                 if (pts.length() == 0) return null
+                val storedWidth = obj.optDouble("width", 2.0).toFloat()
+                val baseWidth = if (obj.has("bw")) {
+                    obj.optDouble("bw", storedWidth.toDouble()).toFloat()
+                } else {
+                    legacyBaseWidth ?: storedWidth
+                }
                 val stroke = Stroke(
                     id = obj.optString("id").ifBlank { UUID.randomUUID().toString() },
                     page = obj.getInt("page"),
                     color = obj.getInt("color"),
-                    width = obj.optDouble("width", 2.0).toFloat(),
-                    highlighter = obj.optBoolean("hl", false)
+                    width = storedWidth,
+                    highlighter = obj.optBoolean("hl", false),
+                    baseWidth = baseWidth,
                 )
                 for (i in 0 until pts.length()) {
                     val p = pts.getJSONArray(i)

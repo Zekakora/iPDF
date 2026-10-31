@@ -11,7 +11,11 @@ enum class PenTool { NONE, PEN, HIGHLIGHTER, ERASER, LASSO }
 
 enum class EraserMode { STROKE, PIXEL }
 
-/** Colour is ARGB (alpha included); width is stored in PDF points (1/72 inch). */
+/**
+ * Colour is ARGB (alpha included). [width] is a preset size shown in the dock and editor; it is
+ * independent of the document: the page's own long edge decides how many PDF points it becomes, so
+ * the same preset covers the same fraction of an A4 page and of a wide slide.
+ */
 data class BrushPreset(val color: Int, val width: Float)
 
 /** Pen/tool preferences, persisted so brush choices survive restarts. */
@@ -48,9 +52,21 @@ class PenSettings(context: Context) {
         private set
     var eraserSelected by mutableStateOf(prefs.getInt("eraserSelected", 1).coerceIn(0, 3))
         private set
-    var eraserMode by mutableStateOf(
-        runCatching { EraserMode.valueOf(prefs.getString("eraserMode", null) ?: "") }
-            .getOrDefault(EraserMode.STROKE)
+
+    /**
+     * Erase mode per eraser preset, so the four eraser tips are independent: switching one tip to
+     * pixel erasing leaves the other three in stroke mode. The old single [eraserMode] value is
+     * only read as the starting point for users who never used the per-preset modes.
+     */
+    var eraserModes by mutableStateOf(
+        List(ERASER_PRESET_COUNT) { index ->
+            val stored = prefs.getString("$ERASER_MODE_KEY_PREFIX$index", null)
+            if (stored != null) {
+                runCatching { EraserMode.valueOf(stored) }.getOrDefault(EraserMode.STROKE)
+            } else {
+                legacyEraserMode()
+            }
+        }
     )
         private set
 
@@ -103,7 +119,29 @@ class PenSettings(context: Context) {
                 .putInt("schema", 2)
                 .apply()
         }
+        // Schema 3 stores brush sizes relative to a reference page. Older builds saved absolute
+        // PDF points (eraser tips 8/16/26/40, pen 1.6–4.8). Convert them once so existing presets
+        // keep their on-screen size; the same conversion is applied to journaled strokes when they
+        // are read back.
+        if (prefs.getInt("schema", 0) < 3) {
+            eraserPresets = eraserPresets.map { it.copy(width = legacyToRelative(it.width)) }
+            penPresets = penPresets.map { it.copy(width = legacyToRelative(it.width)) }
+            highlighterPresets = highlighterPresets.map { it.copy(width = legacyToRelative(it.width)) }
+            prefs.edit()
+                .putString("eraser", encode(eraserPresets))
+                .putString("pen", encode(penPresets))
+                .putString("hl", encode(highlighterPresets))
+                .putInt("schema", 3)
+                .apply()
+        }
     }
+
+    /**
+     * Converts a width saved by an older build, which treated it as absolute points on an A4 page,
+     * into the relative value that reproduces the same size on an A4 page today. The same
+     * conversion is used for journaled strokes read back by [ReaderSession].
+     */
+    private fun legacyToRelative(widthPt: Float): Float = legacyWidthToRelative(widthPt)
 
     val isDrawingTool: Boolean get() = tool == PenTool.PEN || tool == PenTool.HIGHLIGHTER
 
@@ -111,6 +149,9 @@ class PenSettings(context: Context) {
         get() = tool == PenTool.PEN || tool == PenTool.HIGHLIGHTER || tool == PenTool.ERASER
 
     val eraserWidth: Float get() = eraserPresets[eraserSelected].width
+
+    /** Erase mode of the eraser tip that is currently selected in the rail. */
+    val eraserMode: EraserMode get() = eraserModes[eraserSelected]
 
     val activePreset: BrushPreset
         get() = when (tool) {
@@ -234,7 +275,8 @@ class PenSettings(context: Context) {
             }
 
             PenTool.ERASER -> {
-                val clamped = width.coerceIn(4f, 48f)
+                // Eraser tips are stored on the same relative scale as the other brushes.
+                val clamped = width.coerceIn(0.4f, 8f)
                 eraserPresets = eraserPresets.toMutableList()
                     .also { it[eraserSelected] = it[eraserSelected].copy(width = clamped) }
             }
@@ -291,8 +333,14 @@ class PenSettings(context: Context) {
         updateColor(color)
     }
 
+    /** Changes the erase mode of the currently selected eraser tip only. */
     fun updateEraserMode(mode: EraserMode) {
-        eraserMode = mode
+        updateEraserMode(eraserSelected, mode)
+    }
+
+    fun updateEraserMode(index: Int, mode: EraserMode) {
+        if (index !in eraserModes.indices) return
+        eraserModes = eraserModes.toMutableList().also { it[index] = mode }
         persist()
     }
 
@@ -323,13 +371,22 @@ class PenSettings(context: Context) {
             .putInt("penSelected", penSelected)
             .putInt("hlSelected", highlighterSelected)
             .putInt("eraserSelected", eraserSelected)
-            .putString("eraserMode", eraserMode.name)
             .putFloat("stabilizer", stabilizer)
             .putFloat("zoomSpeed", zoomSpeed)
             .putFloat("scrollSpeed", scrollSpeed)
             .putString("lastInkTool", lastInkTool.name)
+            .also { editor ->
+                eraserModes.forEachIndexed { index, mode ->
+                    editor.putString("$ERASER_MODE_KEY_PREFIX$index", mode.name)
+                }
+            }
             .apply()
     }
+
+    /** The pre-per-preset mode, used to seed the four tips on first launch after this change. */
+    private fun legacyEraserMode(): EraserMode =
+        runCatching { EraserMode.valueOf(prefs.getString("eraserMode", null) ?: "") }
+            .getOrDefault(EraserMode.STROKE)
 
     private fun loadColors(key: String, fallback: List<Int>): List<Int> {
         val raw = prefs.getString(key, null) ?: return fallback
@@ -356,6 +413,16 @@ class PenSettings(context: Context) {
 
     companion object {
         val ERASER_COLOR = 0xFF374151.toInt()
+
+        private const val ERASER_MODE_KEY_PREFIX = "eraserMode."
+        private const val ERASER_PRESET_COUNT = 4
+
+        /** A4 long edge, the page size older builds assumed when they stored absolute widths. */
+        private const val LEGACY_REFERENCE_PAGE_PT = 841.89f
+
+        /** The same A4-to-reference conversion [legacyToRelative] applies, for other readers. */
+        fun legacyWidthToRelative(widthPt: Float): Float =
+            widthPt * REFERENCE_PAGE_LONG_EDGE_PT / LEGACY_REFERENCE_PAGE_PT
 
         val inkColors = listOf(
             0xFF202124.toInt(),
@@ -389,6 +456,8 @@ class PenSettings(context: Context) {
             BrushPreset(0x8CF9A8D4.toInt(), 10f)
         )
 
+        // On the 840 pt reference page these are 8 / 16 / 26 / 40 pt tips; on any other page they
+        // scale with its long edge so the effective tip keeps the same relative size.
         private fun defaultEraserPresets() = listOf(
             BrushPreset(ERASER_COLOR, 8f),
             BrushPreset(ERASER_COLOR, 16f),

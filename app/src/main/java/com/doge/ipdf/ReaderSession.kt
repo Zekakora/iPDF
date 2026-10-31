@@ -57,6 +57,45 @@ class ReaderSession private constructor(
             sessions.forEach { it.flush() }
         }
 
+        /** Drops cached sessions so the next open prepares them again from disk. */
+        internal fun forgetAll() {
+            synchronized(cache) { cache.clear() }
+        }
+
+        /**
+         * Removes only regenerable per-document artifacts: export scratch PDFs, page-size caches
+         * and crash-left temporary files. The pristine source PDF, ink journal, journal backup and
+         * all preferences are preserved. Active exports are serialized through their mutex.
+         */
+        internal suspend fun clearDisposableCachesForCleanup(
+            context: Context,
+            stats: CacheCleanupStats,
+        ) {
+            withContext(Dispatchers.IO) {
+                val active = synchronized(cache) { cache.values.toList() }
+                active.forEach { it.clearDisposableCachesLocked(stats) }
+
+                synchronized(cache) {
+                    val activeDirs = cache.values.mapTo(HashSet()) { it.docDir }
+                    val documentsDir = File(context.filesDir, "documents")
+                    val dirs = try {
+                        documentsDir.listFiles()
+                    } catch (_: Throwable) {
+                        stats.failures++
+                        null
+                    }
+                    dirs?.forEach { dir ->
+                        if (!dir.isDirectory || dir in activeDirs) return@forEach
+                        // No live session means no in-flight journal/export can own these files.
+                        deleteTracked(File(dir, "export.pdf"), stats)
+                        deleteTracked(File(dir, "page-sizes.json"), stats)
+                        deleteTracked(File(dir, "source.tmp"), stats)
+                        deleteTracked(File(dir, "strokes.tmp"), stats)
+                    }
+                }
+            }
+        }
+
         private fun sha1(value: String): String {
             val digest = MessageDigest.getInstance("SHA-1").digest(value.toByteArray())
             return digest.joinToString("") { "%02x".format(it) }
@@ -76,6 +115,12 @@ class ReaderSession private constructor(
     var pageSizes: List<PageSize> = emptyList()
         private set
 
+    /**
+     * Invoked on the main thread when [prepare] replaced the pristine copy. The reader rebuilds its
+     * page view from it, because the old one still renders the previous file.
+     */
+    var onReimport: (() -> Unit)? = null
+
     val strokes = mutableStateListOf<Stroke>()
     var saveState by mutableStateOf(SaveState(SaveState.Kind.LOADING))
     var canUndo by mutableStateOf(false)
@@ -88,6 +133,7 @@ class ReaderSession private constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val exportMutex = Mutex()
+    private val pageSizesLock = Any()
     private var journalJob: Job? = null
     private var exportJob: Job? = null
     private var viewportJob: Job? = null
@@ -142,23 +188,23 @@ class ReaderSession private constructor(
                 val lastExport = prefs.getLong(exportedSizeKey, -1L)
                 val externallyChanged = before != null && stored != null &&
                     before.text != stored && (lastExport <= 0L || before.size != lastExport)
+                val imported = !sourceFile.exists() || externallyChanged
+                if (imported) importSource()
+
+                // Page sizes are needed to read journals from builds that stored absolute widths.
+                val cachedSizes = loadPageSizes()
+                val measuredSizes = cachedSizes ?: measurePageSizes()?.also(::savePageSizes)
+                val pageEdges = measuredSizes.orEmpty().map { maxOf(it.width, it.height) }
                 // Read the journal before doing anything that could touch it. It is the only copy of
                 // strokes that have not reached the PDF yet, so it must never be discarded just
                 // because the provider file changed underneath us.
-                val journal = readJournal()
-                var loaded = journal.strokes
+                val journal = readJournal(pageEdges)
+                var loaded = normalizeWidths(journal.strokes, pageEdges, legacy = true)
                 foreignAdopted = journal.foreignAdopted
                 var adoptedNow = false
                 var fromPdf = false
-                var imported = false
-                if (!sourceFile.exists() || externallyChanged) {
-                    importSource()
-                    imported = true
-                }
 
                 val name = queryDisplayName()
-                val cachedSizes = loadPageSizes()
-                val measuredSizes = cachedSizes ?: measurePageSizes()?.also(::savePageSizes)
 
                 // Search the PDF for our recovered ink and for foreign ink only once per source
                 // file. A clean document used to reload the entire PDF with PDFBox twice on every
@@ -172,11 +218,15 @@ class ReaderSession private constructor(
                             ?: PdfAnnotationReader.Result(emptyList(), emptyList(), false)
                     }
                     if (annotations.ok) {
+                        // Strokes recovered from the PDF were written by older builds as absolute
+                        // points; let the page size turn them into page-relative sizes.
+                        val ours = normalizeWidths(annotations.ours, pageEdges, legacy = true)
+                        val foreign = normalizeWidths(annotations.foreign, pageEdges, legacy = false)
                         if (loaded.isEmpty()) {
-                            loaded = annotations.ours + annotations.foreign
-                            fromPdf = annotations.ours.isNotEmpty()
+                            loaded = ours + foreign
+                            fromPdf = ours.isNotEmpty()
                         } else if (!foreignAdopted) {
-                            loaded = loaded + annotations.foreign
+                            loaded = loaded + foreign
                         }
                         if (annotations.foreign.isNotEmpty()) {
                             foreignAdopted = true
@@ -209,6 +259,11 @@ class ReaderSession private constructor(
                     updateUndoState()
                     onReady()
                 }
+                if (imported) {
+                    // A re-imported pristine copy has new page geometry; the reader has to swap in a
+                    // renderer for it and adopt the new sizes.
+                    onReimport?.invoke()
+                }
                 if ((fromPdf && loaded.isNotEmpty()) || adoptedNow) {
                     prefs.edit().putLong(savedAtKey, now).commit()
                     writeJournal()
@@ -228,6 +283,28 @@ class ReaderSession private constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Re-applies every stroke's page-relative width using the page geometry the reader actually
+     * renders. Called once the page view is ready, because a bounding box is not the same as the
+     * page's real rendered size (rotations, crop boxes and slide sizes differ).
+     */
+    fun applyPageGeometry(pageCount: Int, longEdgeOf: (Int) -> Float) {
+        if (pageCount <= 0) return
+        var changed = false
+        strokes.forEach { stroke ->
+            if (stroke.page !in 0 until pageCount) return@forEach
+            // Journals were already converted to relative widths while loading; this only makes
+            // sure the rendered width matches the real page geometry.
+            val edge = longEdgeOf(stroke.page).coerceAtLeast(1f)
+            val expected = brushWidthToPagePt(stroke.baseWidth, edge)
+            if (kotlin.math.abs(stroke.width - expected) > 0.01f) {
+                stroke.setBaseWidth(stroke.baseWidth, edge)
+                changed = true
+            }
+        }
+        if (changed) inkRevision++
     }
 
     fun addStroke(stroke: Stroke) {
@@ -387,6 +464,15 @@ class ReaderSession private constructor(
 
     fun savedViewport(): Viewport? =
         viewport ?: Viewport.fromJson(prefs.getString(viewportKey, null))
+
+    private suspend fun clearDisposableCachesLocked(stats: CacheCleanupStats) {
+        exportMutex.withLock {
+            deleteTracked(exportTemp, stats)
+            synchronized(pageSizesLock) {
+                deleteTracked(pageSizesFile, stats)
+            }
+        }
+    }
 
     /** Persists the journal, viewport and PDF immediately; used when tabs/files/app lose focus. */
     fun flush() {
@@ -640,20 +726,56 @@ class ReaderSession private constructor(
 
     private data class Journal(val strokes: List<Stroke>, val foreignAdopted: Boolean)
 
-    private fun readJournal(): Journal {
-        parseJournal(journalFile)?.let { return it }
-        // A half-written journal is the one case where the previous copy is better.
-        return parseJournal(journalBackup) ?: Journal(emptyList(), false)
+    /**
+     * [pageLongEdges] is the long edge of each page. It is only needed to convert journals from
+     * builds that stored absolute point widths; strokes already carrying a relative width keep the
+     * width they were saved with.
+     */
+    /**
+     * Stores each stroke's page-relative size for its own page. [legacy] converts widths written
+     * before brush sizes became page-relative; foreign annotations already carry relative widths.
+     */
+    private fun normalizeWidths(
+        strokes: List<Stroke>,
+        pageEdges: List<Float>,
+        legacy: Boolean,
+    ): List<Stroke> {
+        strokes.forEach { stroke ->
+            val edge = pageEdges.getOrNull(stroke.page) ?: return@forEach
+            val base = if (legacy) PenSettings.legacyWidthToRelative(stroke.width) else stroke.baseWidth
+            stroke.setBaseWidth(base, edge)
+        }
+        return strokes
     }
 
-    private fun parseJournal(file: File): Journal? {
+    private fun readJournal(pageLongEdges: List<Float>): Journal {
+        parseJournal(journalFile, pageLongEdges)?.let { return it }
+        // A half-written journal is the one case where the previous copy is better.
+        return parseJournal(journalBackup, pageLongEdges) ?: Journal(emptyList(), false)
+    }
+
+    private fun parseJournal(file: File, pageLongEdges: List<Float>): Journal? {
         if (!file.exists()) return null
         return runCatching {
             val root = JSONObject(file.readText())
             val array = root.optJSONArray("strokes") ?: return@runCatching null
             val result = ArrayList<Stroke>(array.length())
             for (i in 0 until array.length()) {
-                Stroke.fromJson(array.getJSONObject(i))?.let { result.add(it) }
+                val obj = array.getJSONObject(i)
+                // Journals from before page-relative brushes stored absolute point widths; convert
+                // them so the strokes keep the size they were drawn with on their own page.
+                val legacy = if (obj.has("bw")) {
+                    null
+                } else {
+                    PenSettings.legacyWidthToRelative(obj.optDouble("width", 2.0).toFloat())
+                }
+                val stroke = Stroke.fromJson(obj, legacyBaseWidth = legacy)
+                if (stroke != null) {
+                    pageLongEdges.getOrNull(stroke.page)?.let { edge ->
+                        stroke.setBaseWidth(stroke.baseWidth, edge)
+                    }
+                    result.add(stroke)
+                }
             }
             Journal(result, root.optBoolean("foreignAdopted", false))
         }.getOrNull()
@@ -730,9 +852,9 @@ class ReaderSession private constructor(
             }
     }.getOrNull() ?: directFile()?.name
 
-    private fun loadPageSizes(): List<PageSize>? {
-        if (!pageSizesFile.isFile) return null
-        return runCatching {
+    private fun loadPageSizes(): List<PageSize>? = synchronized(pageSizesLock) {
+        if (!pageSizesFile.isFile) return@synchronized null
+        return@synchronized runCatching {
             val json = JSONObject(pageSizesFile.readText())
             if (json.optInt("version", 0) != 1) return@runCatching null
             val pages = json.optJSONArray("pages") ?: return@runCatching null
@@ -762,13 +884,15 @@ class ReaderSession private constructor(
     }.getOrNull()?.takeIf { it.isNotEmpty() }
 
     private fun savePageSizes(sizes: List<PageSize>) {
-        runCatching {
-            val pages = JSONArray()
-            sizes.forEach { page ->
-                pages.put(JSONObject().put("w", page.width.toDouble()).put("h", page.height.toDouble()))
+        synchronized(pageSizesLock) {
+            runCatching {
+                val pages = JSONArray()
+                sizes.forEach { page ->
+                    pages.put(JSONObject().put("w", page.width.toDouble()).put("h", page.height.toDouble()))
+                }
+                val json = JSONObject().put("version", 1).put("pages", pages)
+                pageSizesFile.writeText(json.toString())
             }
-            val json = JSONObject().put("version", 1).put("pages", pages)
-            pageSizesFile.writeText(json.toString())
         }
     }
 

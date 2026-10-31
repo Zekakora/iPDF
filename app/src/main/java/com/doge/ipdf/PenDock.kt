@@ -396,7 +396,8 @@ private fun PresetSwatch(
                     }
 
                     PenTool.ERASER -> {
-                        val radius = (preset.width / 48f * size.minDimension).coerceIn(2.5.dp.toPx(), size.minDimension / 2f)
+                        val radius = (preset.width / 8f * size.minDimension)
+                            .coerceIn(2.5.dp.toPx(), size.minDimension / 2f)
                         drawCircle(
                             color = contentColor.copy(alpha = 0.55f),
                             radius = radius,
@@ -431,6 +432,17 @@ private fun PresetSwatch(
 private fun sizeLabel(tool: PenTool, width: Float): String =
     if (tool == PenTool.ERASER || width >= 10f) width.roundToInt().toString()
     else String.format(java.util.Locale.US, "%.1f", width)
+
+/**
+ * The size a preset reaches on an A4 sheet, in points. Presets are page-relative now, so the
+ * swatch and editor show the familiar A4 width while the page itself decides the real size.
+ */
+private fun a4WidthPt(presetWidth: Float): String =
+    String.format(
+        java.util.Locale.US,
+        "%.1f",
+        brushWidthToPagePt(presetWidth, REFERENCE_PAGE_LONG_EDGE_PT),
+    )
 
 @Composable
 private fun DockToolButton(tool: PenTool, settings: PenSettings) {
@@ -696,7 +708,7 @@ private fun BrushEditor(settings: PenSettings, onDone: () -> Unit) {
                     modifier = Modifier.weight(1f)
                 )
                 Text(
-                    text = "${sizeLabel(tool, preset.width)} pt",
+                    text = "${sizeLabel(tool, preset.width)} · ${a4WidthPt(preset.width)} pt on A4",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -797,6 +809,8 @@ private fun ColorRow(
 @Composable
 private fun EraserEditor(settings: PenSettings) {
     val preset = settings.activePreset
+    val index = settings.selectedIndex
+    val mode = settings.eraserModes.getOrElse(index) { EraserMode.STROKE }
     Text(
         "Tip size",
         style = MaterialTheme.typography.labelMedium,
@@ -805,26 +819,31 @@ private fun EraserEditor(settings: PenSettings) {
     Slider(
         value = preset.width,
         onValueChange = { settings.updateWidth(it) },
-        valueRange = 4f..48f
+        valueRange = 0.4f..8f
     )
     Spacer(Modifier.height(6.dp))
     Text(
-        "Erase mode",
+        "Erase mode for this tip",
         style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Text(
+        "Each of the four eraser sizes remembers its own mode.",
+        style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
     Spacer(Modifier.height(4.dp))
     EraserModeRow(
         title = "Erase pixels",
         subtitle = "Only the part under the tip disappears",
-        selected = settings.eraserMode == EraserMode.PIXEL,
-        onClick = { settings.updateEraserMode(EraserMode.PIXEL) }
+        selected = mode == EraserMode.PIXEL,
+        onClick = { settings.updateEraserMode(index, EraserMode.PIXEL) }
     )
     EraserModeRow(
         title = "Erase strokes",
         subtitle = "Remove the whole stroke",
-        selected = settings.eraserMode == EraserMode.STROKE,
-        onClick = { settings.updateEraserMode(EraserMode.STROKE) }
+        selected = mode == EraserMode.STROKE,
+        onClick = { settings.updateEraserMode(index, EraserMode.STROKE) }
     )
 }
 

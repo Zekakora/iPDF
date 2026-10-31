@@ -17,11 +17,34 @@ android {
         applicationId = "com.doge.ipdf"
         minSdk = 29
         targetSdk = 36
-        versionCode = 13
-        versionName = "0.5.1"
+        versionCode = 14
+        versionName = "0.5.2"
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+
+    buildTypes {
+        debug {
+            isDebuggable = true
+        }
+        release {
+            isDebuggable = false
+            // No production keystore is checked into this repository. The existing release
+            // artifacts are signed with the standard debug certificate, so reuse that already
+            // configured signer here; this keeps local release builds installable without
+            // inventing or exposing credentials. Replace this with a real release signer before
+            // publishing.
+            signingConfig = signingConfigs.getByName("debug")
+            // R8 is left off deliberately: PDFBox and the optional reflective PenEngine bridge are
+            // not device-validated under shrinking yet. The release variant still excludes debug
+            // tooling and compiles out verbose input diagnostics via BuildConfig.DEBUG.
+            isMinifyEnabled = false
+            isShrinkResources = false
+        }
+    }
 
     kotlinOptions {
         jvmTarget = "1.8"
@@ -35,7 +58,6 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.11.0")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")
     // Parses and writes standard PDF annotations (PDAnnotationInk-style /Ink dictionaries).

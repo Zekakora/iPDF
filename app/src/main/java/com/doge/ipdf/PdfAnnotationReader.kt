@@ -6,6 +6,7 @@ import com.tom_roush.pdfbox.cos.COSName
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import java.io.File
 import java.io.InputStream
+import kotlin.math.max
 
 /**
  * Reads both this app's saved /Ink annotations and adoptable foreign /Ink or /Highlight annotations
@@ -41,7 +42,7 @@ object PdfAnnotationReader {
                     for (annotationIndex in 0 until annots.size()) {
                         val dict = annots.getObject(annotationIndex) as? COSDictionary ?: continue
                         if (PdfInkExporter.isOurInk(dict)) {
-                            PdfInkImporter.toStroke(dict, pageIndex, ourPageHeight)?.let(ours::add)
+                            PdfInkImporter.toStroke(dict, pageIndex, ourPageHeight, page.mediaBox.width)?.let(ours::add)
                             continue
                         }
                         if (!foreignEnabled) continue
@@ -53,6 +54,7 @@ object PdfAnnotationReader {
                                 cropLeft,
                                 cropBottom,
                                 cropHeight,
+                                max(crop.width, cropHeight),
                                 foreign,
                             )
 
@@ -63,6 +65,7 @@ object PdfAnnotationReader {
                                 cropLeft,
                                 cropBottom,
                                 cropHeight,
+                                max(crop.width, cropHeight),
                                 foreign,
                             )
                         }

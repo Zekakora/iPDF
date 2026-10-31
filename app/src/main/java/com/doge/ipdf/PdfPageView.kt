@@ -10,10 +10,9 @@ import android.graphics.Path
 import android.os.ParcelFileDescriptor
 import android.graphics.RectF
 import android.graphics.pdf.PdfRenderer
-import android.os.SystemClock
+import android.util.Log
 import android.util.LruCache
 import android.view.MotionEvent
-import android.view.ScaleGestureDetector
 import android.view.VelocityTracker
 import android.view.View
 import android.view.ViewConfiguration
@@ -60,8 +59,13 @@ class PdfPageView(context: Context) : View(context) {
         private const val BASE_MAX_DIM_PX = 1280
         private const val PAGE_GAP_PT = 10f
         private const val VIEWPORT_REPORT_MS = 250L
-        private const val PALM_WINDOW_MS = 280L
         private const val SCROLLBAR_HIDE_MS = 1700L
+
+        /** Below this lift speed a drag stops where the finger left it. */
+        private const val FLING_MIN_VELOCITY = 400f
+
+        private const val TOUCH_TAG = "iPdfTouch"
+        private const val OPEN_TAG = "iPdfOpen"
 
         /**
          * Tiles are requested from the draw pass, but only a few per frame: the renderer is a single
@@ -73,7 +77,7 @@ class PdfPageView(context: Context) : View(context) {
         private const val PRIORITY_BASE = 0
         private const val PRIORITY_TILE = 1
 
-        private const val BASE_CACHE_PAGES = 3
+        private const val BASE_CACHE_PAGES = 4
     }
 
     var onViewportChanged: ((Viewport) -> Unit)? = null
@@ -103,7 +107,12 @@ class PdfPageView(context: Context) : View(context) {
             invalidate()
         }
 
-    var eraserWidthPt: Float = 16f
+    /**
+     * Eraser tip size as a page-relative preset value (see [BrushPreset]); it is converted to the
+     * page's points with [brushWidthToPagePt] whenever it is used, so the tip covers the same part
+     * of an A4 page and of a wide slide.
+     */
+    var eraserWidth: Float = 16f
         set(value) {
             field = value
             invalidate()
@@ -123,6 +132,25 @@ class PdfPageView(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private val pageGapPx get() = PAGE_GAP_PT * density
+
+    /**
+     * All finger/stylus ownership decisions live in this pure state machine. The view only converts
+     * MotionEvents into frames and applies the resulting effects, which keeps every threshold in one
+     * place and makes the tricky contact add/remove/cancel sequences testable off-device.
+     */
+    private val inputArbiter = TouchArbiter(
+        TouchArbiter.Config(
+            panArmPx = max(touchSlop * 2f, 18f * density),
+            tapSlopPx = touchSlop.toFloat(),
+            pinchArmSpanPx = max(touchSlop * 2.5f, 24f * density),
+            pinchArmContactPx = max(touchSlop * 1.5f, 12f * density),
+            pinchMinSpanPx = 20f * density,
+            // Contact geometry is optional: panels that report no meaningful major/minor simply
+            // never reach these limits. On panels that do, a palm-sized ellipse is rejected whole.
+            palmMajorPx = 96f * density,
+            palmMinorPx = 72f * density,
+        )
+    )
 
     private var session: ReaderSession? = null
     private var openedFile: File? = null
@@ -176,8 +204,13 @@ class PdfPageView(context: Context) : View(context) {
     private val failedTiles = HashSet<TileKey>()
 
     // One coarse full-page bitmap per recently visible page. It lives outside the tile LRU so cache
-    // pressure can never evict the layer that guarantees full page coverage.
-    private val baseCache = LruCache<Int, Bitmap>(BASE_CACHE_PAGES)
+    // pressure can never evict the layer that guarantees full page coverage. Access order lets us
+    // keep recently seen pages, and pages currently on screen are pinned by [visiblePages].
+    private val baseCache = LinkedHashMap<Int, Bitmap>(BASE_CACHE_PAGES, 0.75f, true)
+    private val visiblePages = HashSet<Int>()
+    /** Immutable per-frame snapshot read by the render thread to discard obsolete base work. */
+    @Volatile
+    private var wantedBasePages: Set<Int> = emptySet()
     private val pendingBases = HashSet<Int>()
     private val failedBases = HashSet<Int>()
 
@@ -197,12 +230,10 @@ class PdfPageView(context: Context) : View(context) {
         set(value) {
             field = value.coerceIn(0.5f, 2f)
         }
-    private var pinching = false
-    private var pinchRenderBucket = 1f
-    private var rejectFingerGesture = false
-    private var rejectMultiTouch = false
-    private var pinchCandidate = false
-    private var firstFingerDownAt = 0L
+    private val pinching: Boolean get() = inputArbiter.pinching
+    // Input diagnostics are a development tool only; even setting the log tag cannot enable them
+    // in a release build.
+    private val touchLogging = BuildConfig.DEBUG && Log.isLoggable(TOUCH_TAG, Log.DEBUG)
     private var scrollY = 0f
     private var panX = 0f
     private var topInset = 0
@@ -228,6 +259,7 @@ class PdfPageView(context: Context) : View(context) {
     }
 
     private val pagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val emptyStatePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val inkPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
@@ -269,8 +301,9 @@ class PdfPageView(context: Context) : View(context) {
     private var eraserX = Float.NaN
     private var eraserY = Float.NaN
     private var eraserPage = -1
+    /** Diameter of the eraser tip on its page, in that page's points. */
+    private var eraserTipPt = 16f
     private var erasing = false
-    private var lastPenEventTime = 0L
 
     private var lassoPoints: MutableList<InkPoint>? = null
     private var lassoPage = -1
@@ -297,46 +330,24 @@ class PdfPageView(context: Context) : View(context) {
 
     private val scroller = OverScroller(context)
     private val velocity = VelocityTracker.obtain()
-    private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-        override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
-            if (!pinchCandidate) return false
-            abortFling()
-            // A pinch starts with a finger down, but it is not manual page scrolling. Do not let
-            // a zoom that changes the top page reveal the scrollbar.
-            manualScrollStartPage = -1
-            dragMode = DragMode.PINCH
-            pinching = true
-            pinchRenderBucket = renderZoomBucket()
-            return true
-        }
 
-        override fun onScale(detector: ScaleGestureDetector): Boolean {
-            val rawFactor = detector.scaleFactor.coerceAtLeast(0.001f).toDouble()
-            val adjustedFactor = exp(ln(rawFactor) * zoomSpeed.toDouble()).toFloat()
-            val target = (zoom * adjustedFactor).coerceIn(MIN_ZOOM, MAX_ZOOM)
-            if (abs(target - zoom) < 0.0005f) return true
-            zoomAround(detector.focusX, detector.focusY, target)
-            return true
-        }
+    private enum class PanAxis { NONE, VERTICAL, HORIZONTAL }
 
-        override fun onScaleEnd(detector: ScaleGestureDetector) {
-            pinching = false
-            scheduleViewportReport()
-            invalidate()
-        }
-    })
-
-    private enum class DragMode { NONE, UNDECIDED, VERTICAL, HORIZONTAL, PINCH }
-
-    private var dragMode = DragMode.NONE
-    private var activePointerId = MotionEvent.INVALID_POINTER_ID
-    private var downX = 0f
-    private var downY = 0f
-    private var lastX = 0f
-    private var lastY = 0f
+    private var panAxis = PanAxis.NONE
+    /** Zoom when the current pinch was armed; the arbiter emits a scale relative to this point. */
+    private var pinchBaseZoom = 1f
+    /**
+     * Tile bucket at the instant a pinch is armed. While the fingers are down the tile pyramid is
+     * frozen on this bucket: existing full-page coverage is scaled with the gesture, but no new
+     * tile grid is requested until the zoom settles. Chasing every intermediate bucket with the
+     * single PDF thread evicts the very fallbacks that keep the page visible.
+     */
+    private var frozenPinchBucket = 1f
     private var lastTapTime = 0L
     private var lastTapX = 0f
     private var lastTapY = 0f
+    private var fingerDownScrollY = 0f
+    private var fingerDragExtent = 0f
 
     private val viewportReporter = Runnable { reportViewport() }
     private var lastViewport: Viewport? = null
@@ -349,21 +360,61 @@ class PdfPageView(context: Context) : View(context) {
         invalidate()
     }
 
-    fun openDocument(source: File, restore: Viewport?, cachedSizes: List<PageSize> = emptyList()) {
-        if (openedFile == source && renderer != null) return
-        closeDocument()
-        val pfd = ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY)
-        val pdf = try {
-            PdfRenderer(pfd)
-        } catch (t: Throwable) {
-            pfd.close()
-            throw t
+    /**
+     * Opens [source] for rendering. Returns false when the renderer could not be created (the
+     * document is encrypted, truncated or gone); the view is left empty so the caller can report it
+     * instead of showing a permanently dark page.
+     */
+    fun openDocument(
+        source: File,
+        restore: Viewport?,
+        cachedSizes: List<PageSize> = emptyList(),
+    ): Boolean {
+        if (openedFile == source && renderer != null) return true
+        // A rebuild (tab switch, re-import) attaches the new session before the view is replaced.
+        // closeDocument() reports the old viewport to that new session, which would overwrite the
+        // position and dimension keys it just restored, so park those callbacks meanwhile.
+        val notifyViewport = onViewportChanged
+        val notifyScrollbar = onScrollbarChanged
+        onViewportChanged = null
+        onScrollbarChanged = null
+        try {
+            closeDocument()
+            val pfd = ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY)
+            val pdf = try {
+                PdfRenderer(pfd)
+            } catch (t: Throwable) {
+                // The previous document is already closed at this point; never keep a stale or
+                // half-opened renderer around, the page would show nothing at all.
+                pfd.close()
+                lastOpenError = t.message
+                Log.e(OPEN_TAG, "PdfRenderer failed for ${source.name}: ${t.message}", t)
+                return false
+            }
+            lastOpenError = null
+            activateDocument(source, pfd, pdf, restore, cachedSizes)
+            return true
+        } finally {
+            onViewportChanged = notifyViewport
+            onScrollbarChanged = notifyScrollbar
         }
+    }
+
+    /** Most recent failure from [openDocument]; null after a successful open. */
+    var lastOpenError: String? = null
+        private set
+
+    private fun activateDocument(
+        source: File,
+        pfd: ParcelFileDescriptor,
+        pdf: PdfRenderer,
+        restore: Viewport?,
+        cachedSizes: List<PageSize>,
+    ) {
         descriptor = pfd
         renderer = pdf
         openedFile = source
         zoom = 1f
-        pinching = false
         scrollY = 0f
         panX = 0f
         scrollbarVisible = false
@@ -374,10 +425,15 @@ class PdfPageView(context: Context) : View(context) {
         if (cachedSizes.size == pdf.pageCount) {
             sizes.addAll(cachedSizes)
         } else {
+            // Measure directly: openPage() inside the loop must not be allowed to leak a page
+            // when one of them fails, or every later openPage call throws and the view stays dark.
             try {
                 for (index in 0 until pdf.pageCount) {
-                    pdf.openPage(index).use { page ->
+                    val page = pdf.openPage(index)
+                    try {
                         sizes.add(PageSize(page.width.toFloat(), page.height.toFloat()))
+                    } finally {
+                        page.close()
                     }
                 }
                 session?.storePageSizes(sizes.toList())
@@ -387,7 +443,9 @@ class PdfPageView(context: Context) : View(context) {
         }
         if (sizes.isNotEmpty()) {
             // Start the coarse page before the first layout pass so the first frame is not white.
-            requestBase((restore?.page ?: 0).coerceIn(0, sizes.lastIndex))
+            val page = (restore?.page ?: 0).coerceIn(0, sizes.lastIndex)
+            wantedBasePages = setOf(page)
+            requestBase(page)
         }
         pendingRestore = restore
         requestLayout()
@@ -398,7 +456,9 @@ class PdfPageView(context: Context) : View(context) {
     fun closeDocument() {
         reportViewport()
         tileCache.evictAll()
-        baseCache.evictAll()
+        baseCache.clear()
+        visiblePages.clear()
+        wantedBasePages = emptySet()
         pendingTiles.clear()
         failedTiles.clear()
         pendingBases.clear()
@@ -415,6 +475,10 @@ class PdfPageView(context: Context) : View(context) {
         erasing = false
         eraserPage = -1
         clearLassoState()
+        inputArbiter.reset()
+        panAxis = PanAxis.NONE
+        velocity.clear()
+        lastTapTime = 0L
         zoom = 1f
         scrollY = 0f
         panX = 0f
@@ -441,6 +505,11 @@ class PdfPageView(context: Context) : View(context) {
         autoMarkerArmed = true
         invalidate()
     }
+
+    /** Session currently attached; used to avoid re-opening the same document on every update. */
+    var boundSession: ReaderSession? = null
+    /** Bumped by the reader when the pristine copy is replaced, forcing a re-open. */
+    var boundEpoch: Int = -1
 
     /** Releases the renderer and its background worker when Compose removes this view. */
     fun release() {
@@ -647,6 +716,7 @@ class PdfPageView(context: Context) : View(context) {
     // ---------------------------------------------------------------- drawing
 
     override fun onDraw(canvas: Canvas) {
+        val drawStartedAt = System.nanoTime()
         super.onDraw(canvas)
         val scale = scale()
         canvas.save()
@@ -655,30 +725,92 @@ class PdfPageView(context: Context) : View(context) {
 
         if (sizes.isEmpty()) {
             wantedTiles = emptySet()
+            visiblePages.clear()
             canvas.restore()
             return
         }
 
-        // Freeze the tile pyramid while a pinch is in progress. Zooming out enlarges the visible
-        // area quadratically, so chasing it with new high-resolution tiles used to flood the single
-        // render thread, evict every cached fallback and leave white holes on screen. The page base
-        // layer keeps the document visible until the gesture ends, then sharp tiles are requested.
-        val bucket = if (pinching) pinchRenderBucket else renderZoomBucket()
+        // Freeze the tile pyramid while a pinch is in progress. Zooming out grows the visible area
+        // quadratically; requesting a new grid every frame floods the single PDF thread, evicts the
+        // fallbacks that keep the page covered and leaves white tile-shaped holes. The existing
+        // bucket and the full-page base are scaled with the gesture until the fingers settle.
+        val pinchingNow = pinching
+        val bucket = if (pinchingNow) frozenPinchBucket else renderZoomBucket()
         val wanted = HashSet<TileKey>()
         val missing = ArrayList<TileRequest>()
+        val missingBases = HashSet<Int>()
+        visiblePages.clear()
         for (index in sizes.indices) {
             val size = sizes[index]
             val drawWidth = size.width * scale
             val drawHeight = size.height * scale
             val top = pageTopPt(index) * scale - scrollY + topInset
             if (top > height || top + drawHeight < topInset) continue
+            visiblePages.add(index)
             val left = (width - drawWidth) / 2f + panX
-            drawPageTiles(canvas, index, left, top, drawWidth, drawHeight, scale, bucket, wanted, missing)
+            drawPageTiles(
+                canvas = canvas,
+                pageIndex = index,
+                left = left,
+                top = top,
+                drawWidth = drawWidth,
+                drawHeight = drawHeight,
+                currentScale = scale,
+                bucket = bucket,
+                allowNewTiles = !pinchingNow,
+                wanted = wanted,
+                missing = missing,
+                missingBases = missingBases,
+            )
             drawInk(canvas, index, left, top, drawWidth, drawHeight, scale)
         }
-        wantedTiles = if (pinching) emptySet() else wanted
-        if (!pinching) requestMissingTiles(missing)
+        if (visiblePages.isEmpty()) {
+            // A renderer with measured sizes should always have a visible page; if not, the layout
+            // or geometry is unusable and showing the bare dark surface would look like a black
+            // page. Say what happened instead so the problem is diagnosable.
+            drawEmptyStateMessage(canvas)
+        }
+        trimBaseCache()
+        // Failures are scoped to what is currently visible: a transient allocation failure is
+        // forgotten once the page/tile leaves the viewport, so re-entering it retries instead of
+        // leaving a permanently uncovered region.
+        failedBases.retainAll(visiblePages)
+        if (!pinchingNow) failedTiles.retainAll(wanted)
+        wantedBasePages = HashSet(visiblePages)
+        for (page in missingBases) requestBase(page)
+        if (pinchingNow) {
+            // No new tile work until the pinch ends; in-flight tasks are skipped by wantedTiles.
+            wantedTiles = emptySet()
+        } else {
+            wantedTiles = wanted
+            requestMissingTiles(missing)
+        }
         canvas.restore()
+        if (touchLogging) {
+            val took = (System.nanoTime() - drawStartedAt) / 1_000_000
+            if (pinching || took >= 8) {
+                Log.d(
+                    TOUCH_TAG,
+                    "draw zoom=%.3f pan=%.0f scroll=%.0f took=${took}ms".format(zoom, panX, scrollY),
+                )
+            }
+        }
+    }
+
+    /** Centred hint drawn over the dark background when no page could be laid out. */
+    private fun drawEmptyStateMessage(canvas: Canvas) {
+        val message = lastOpenError?.let { "This PDF could not be opened\n$it" }
+            ?: "This PDF could not be displayed"
+        emptyStatePaint.textAlign = Paint.Align.CENTER
+        emptyStatePaint.color = 0xFFB8BCC4.toInt()
+        emptyStatePaint.textSize = 15f * density
+        val lines = message.split('\n')
+        val lineHeight = emptyStatePaint.textSize * 1.35f
+        var y = height / 2f - (lines.size - 1) * lineHeight / 2f
+        lines.forEach { line ->
+            canvas.drawText(line, width / 2f, y, emptyStatePaint)
+            y += lineHeight
+        }
     }
 
     private fun renderZoomBucket(): Float = when {
@@ -698,19 +830,21 @@ class PdfPageView(context: Context) : View(context) {
         drawHeight: Float,
         currentScale: Float,
         bucket: Float,
+        allowNewTiles: Boolean,
         wanted: MutableSet<TileKey>,
         missing: MutableList<TileRequest>,
+        missingBases: MutableSet<Int>,
     ) {
         pagePaint.color = Color.WHITE
         canvas.drawRect(left, top, left + drawWidth, top + drawHeight, pagePaint)
 
         // The base layer has already been rendered at a fixed, modest resolution. It is what turns
         // a missing tile from a white block into a temporarily soft but readable patch.
-        val base = baseCache.get(pageIndex)
+        val base = baseCache[pageIndex]
         if (base != null) {
             canvas.drawBitmap(base, null, RectF(left, top, left + drawWidth, top + drawHeight), pagePaint)
         } else {
-            requestBase(pageIndex)
+            missingBases.add(pageIndex)
         }
 
         val tileScale = density * bucket
@@ -749,33 +883,31 @@ class PdfPageView(context: Context) : View(context) {
                 val bitmap = tileCache.get(key)
                 if (bitmap != null) {
                     canvas.drawBitmap(bitmap, null, RectF(tileLeft, tileTop, tileRight, tileBottom), pagePaint)
-                } else {
+                } else if (allowNewTiles) {
                     // Any older bucket still in the cache improves on the base layer; it is never
                     // the only content on screen, so partial coverage is harmless now.
-                    if (!pinching) {
-                        drawFallbackTiles(
-                            canvas = canvas,
-                            pageIndex = pageIndex,
-                            pageLeft = left,
-                            pageTop = top,
-                            currentScale = currentScale,
-                            targetLeftPt = tileLeftPt,
-                            targetTopPt = tileTopPt,
-                            targetRightPt = tileLeftPt + tileWidthPt,
-                            targetBottomPt = tileTopPt + tileHeightPt,
-                            targetLeft = tileLeft,
-                            targetTop = tileTop,
-                            targetRight = tileRight,
-                            targetBottom = tileBottom,
-                            targetBucket = bucket,
-                        )
-                        if (key !in failedTiles) {
-                            val centerX = (tileLeft + tileRight) * 0.5f
-                            val centerY = (tileTop + tileBottom) * 0.5f
-                            val dx = centerX - viewportCenterX
-                            val dy = centerY - viewportCenterY
-                            missing.add(TileRequest(key, dx * dx + dy * dy))
-                        }
+                    drawFallbackTiles(
+                        canvas = canvas,
+                        pageIndex = pageIndex,
+                        pageLeft = left,
+                        pageTop = top,
+                        currentScale = currentScale,
+                        targetLeftPt = tileLeftPt,
+                        targetTopPt = tileTopPt,
+                        targetRightPt = tileLeftPt + tileWidthPt,
+                        targetBottomPt = tileTopPt + tileHeightPt,
+                        targetLeft = tileLeft,
+                        targetTop = tileTop,
+                        targetRight = tileRight,
+                        targetBottom = tileBottom,
+                        targetBucket = bucket,
+                    )
+                    if (key !in failedTiles) {
+                        val centerX = (tileLeft + tileRight) * 0.5f
+                        val centerY = (tileTop + tileBottom) * 0.5f
+                        val dx = centerX - viewportCenterX
+                        val dy = centerY - viewportCenterY
+                        missing.add(TileRequest(key, dx * dx + dy * dy))
                     }
                 }
             }
@@ -795,6 +927,24 @@ class PdfPageView(context: Context) : View(context) {
             if (budget <= 0) break
             if (pendingTiles.size >= MAX_PENDING_TILES) break
             if (requestTile(request.key)) budget--
+        }
+    }
+
+    private fun putBase(pageIndex: Int, bitmap: Bitmap) {
+        baseCache[pageIndex] = bitmap
+        trimBaseCache()
+    }
+
+    /**
+     * Keeps the page bases proportional to the current viewport. Pages on screen are pinned even
+     * when the cache is over budget; eviction starts with the least recently used off-screen page.
+     */
+    private fun trimBaseCache() {
+        if (baseCache.size <= BASE_CACHE_PAGES) return
+        val iterator = baseCache.entries.iterator()
+        while (baseCache.size > BASE_CACHE_PAGES && iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.key !in visiblePages) iterator.remove()
         }
     }
 
@@ -890,12 +1040,17 @@ class PdfPageView(context: Context) : View(context) {
                         } else {
                             val width = max(1, ceil(widthPt * tileScale).toInt())
                             val height = max(1, ceil(heightPt * tileScale).toInt())
+                            // Map the tile's page rectangle to the full allocated bitmap. Using the
+                            // nominal scale here would leave the ceil() rounding column/row white at
+                            // the right/bottom edge, which shows as a seam between tiles.
+                            val tileSx = width / widthPt
+                            val tileSy = height / heightPt
                             pdf.openPage(key.page).use { page ->
                                 val value = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                                 value.eraseColor(Color.WHITE)
                                 val transform = Matrix().apply {
-                                    setScale(tileScale, tileScale)
-                                    postTranslate(-leftPt * tileScale, -topPt * tileScale)
+                                    setScale(tileSx, tileSy)
+                                    postTranslate(-leftPt * tileSx, -topPt * tileSy)
                                 }
                                 page.render(value, null, transform, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                                 RenderResult(value)
@@ -910,7 +1065,11 @@ class PdfPageView(context: Context) : View(context) {
                 pendingTiles.remove(key)
                 val bitmap = result.bitmap
                 if (bitmap != null) {
-                    if (generation == renderGeneration && renderer === pdf) tileCache.put(key, bitmap)
+                    // Do not let work for a viewport that has already moved on evict tiles that are
+                    // still covering the screen. Obsolete results are dropped instead of cached.
+                    if (generation == renderGeneration && renderer === pdf && key in wantedTiles) {
+                        tileCache.put(key, bitmap)
+                    }
                 } else if (!result.skipped && generation == renderGeneration) {
                     failedTiles.add(key)
                 }
@@ -937,7 +1096,9 @@ class PdfPageView(context: Context) : View(context) {
         val size = sizes[pageIndex]
         submitRender(PRIORITY_BASE) {
             val result = synchronized(renderLock) {
-                if (generation != renderGeneration || renderer !== pdf) {
+                if (generation != renderGeneration || renderer !== pdf ||
+                    pageIndex !in wantedBasePages
+                ) {
                     RenderResult(bitmap = null, skipped = true)
                 } else {
                     try {
@@ -962,7 +1123,7 @@ class PdfPageView(context: Context) : View(context) {
                 pendingBases.remove(pageIndex)
                 val bitmap = result.bitmap
                 if (bitmap != null) {
-                    if (generation == renderGeneration && renderer === pdf) baseCache.put(pageIndex, bitmap)
+                    if (generation == renderGeneration && renderer === pdf) putBase(pageIndex, bitmap)
                 } else if (!result.skipped && generation == renderGeneration) {
                     failedBases.add(pageIndex)
                 }
@@ -1006,8 +1167,19 @@ class PdfPageView(context: Context) : View(context) {
         if (hasSelection) {
             selection.forEach { if (it.page == pageIndex) drawSelectionGlow(canvas, it) }
         }
+        // At high zoom only a small part of the page is on screen, but every stroke on it used to be
+        // re-tessellated at that scale on every frame — hundreds of paths scaled by 20x, which is
+        // enough to miss frames exactly when the page is being pinched. Skip the ones outside view.
+        val visibleLeft = -left / scale - 32f
+        val visibleTop = (topInset - top) / scale - 32f
+        val visibleRight = (width - left) / scale + 32f
+        val visibleBottom = (height - top) / scale + 32f
         strokes.forEach { stroke ->
-            if (stroke.page == pageIndex) drawStroke(canvas, stroke)
+            if (stroke.page != pageIndex) return@forEach
+            if (!stroke.bounds().intersects(visibleLeft, visibleTop, visibleRight, visibleBottom)) {
+                return@forEach
+            }
+            drawStroke(canvas, stroke)
         }
         if (live != null && live.page == pageIndex) drawStroke(canvas, live)
         if (hasSelection) drawSelectionBounds(canvas, selection)
@@ -1015,10 +1187,10 @@ class PdfPageView(context: Context) : View(context) {
         if (eraserPage == pageIndex && !eraserX.isNaN()) {
             eraserPaint.color = Color.argb(70, 255, 255, 255)
             eraserPaint.strokeWidth = 1.5f
-            canvas.drawCircle(eraserX, eraserY, eraserWidthPt / 2f, eraserPaint)
+            canvas.drawCircle(eraserX, eraserY, eraserTipPt / 2f, eraserPaint)
             eraserPaint.color = Color.argb(220, 255, 255, 255)
             eraserPaint.strokeWidth = 0.8f
-            canvas.drawCircle(eraserX, eraserY, eraserWidthPt / 2f, eraserPaint)
+            canvas.drawCircle(eraserX, eraserY, eraserTipPt / 2f, eraserPaint)
         }
         canvas.restore()
     }
@@ -1228,6 +1400,7 @@ class PdfPageView(context: Context) : View(context) {
     private fun drawStroke(canvas: Canvas, stroke: Stroke) {
         if (stroke.points.isEmpty()) return
         val pressure = if (stroke.highlighter) 1f else 0.7f + 0.45f * stroke.averagePressure()
+        // drawInk has already scaled the canvas to page points, so the stored width is drawn as is.
         inkPaint.strokeWidth = (stroke.width * pressure).coerceAtLeast(0.4f)
         inkPaint.color = stroke.color
         // Keep screen rendering in normal source-over mode. Multiply makes translucent highlight
@@ -1248,67 +1421,277 @@ class PdfPageView(context: Context) : View(context) {
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         handleStylusButtonState(event)
-        val stylusPointer = (0 until event.pointerCount).firstOrNull {
-            val tool = event.getToolType(it)
-            tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER
+        val frame = inputFrame(event) ?: return true
+        applyInputEffects(event, inputArbiter.onFrame(frame))
+
+        // The stylus owns the stream whenever it is in the pointer list. This includes the event
+        // that lifts it while fingers are still down: the drawing gesture ends, and the arbiter
+        // keeps those fingers rejected until they all lift.
+        val penIndex = frame.pointers.indexOfFirst {
+            it.tool == TouchArbiter.PointerTool.STYLUS ||
+                it.tool == TouchArbiter.PointerTool.ERASER
         }
-        if (stylusPointer != null && stylusPointer == 0) {
-            handleStylus(event)
+        if (penIndex >= 0) {
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) lastTapTime = 0L
+            if (event.actionMasked == MotionEvent.ACTION_DOWN ||
+                event.actionMasked == MotionEvent.ACTION_POINTER_DOWN ||
+                event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_POINTER_UP
+            ) {
+                logTouch(event, "pen")
+            }
+            handleStylus(event, penIndex)
             return true
         }
+
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-            firstFingerDownAt = event.eventTime
-            rejectFingerGesture = isPalmLike(event, 0)
-            rejectMultiTouch = rejectFingerGesture
-            pinchCandidate = false
+            // A new touch always stops a fling. Whether it may then pan/zoom is the arbiter's job.
+            abortFling()
+            if (inputArbiter.blocked) {
+                lastTapTime = 0L
+                logTouch(event, "touch blocked")
+            } else {
+                logTouch(event, "finger down")
+                claimDirectSelection(event)
+            }
         }
-        if (rejectFingerGesture) {
-            if (event.actionMasked == MotionEvent.ACTION_UP ||
-                event.actionMasked == MotionEvent.ACTION_CANCEL
-            ) {
-                resetTouchGuard()
+        return true
+    }
+
+    private fun inputFrame(event: MotionEvent): TouchArbiter.Frame? {
+        val count = event.pointerCount
+        if (count <= 0) return null
+        val action = when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> TouchArbiter.Action.DOWN
+            MotionEvent.ACTION_POINTER_DOWN -> TouchArbiter.Action.POINTER_DOWN
+            MotionEvent.ACTION_MOVE -> TouchArbiter.Action.MOVE
+            MotionEvent.ACTION_POINTER_UP -> TouchArbiter.Action.POINTER_UP
+            MotionEvent.ACTION_UP -> TouchArbiter.Action.UP
+            MotionEvent.ACTION_CANCEL -> TouchArbiter.Action.CANCEL
+            else -> return null
+        }
+        val pointers = ArrayList<TouchArbiter.Pointer>(count)
+        for (index in 0 until count) {
+            pointers += TouchArbiter.Pointer(
+                id = event.getPointerId(index),
+                tool = when (event.getToolType(index)) {
+                    MotionEvent.TOOL_TYPE_FINGER -> TouchArbiter.PointerTool.FINGER
+                    MotionEvent.TOOL_TYPE_STYLUS -> TouchArbiter.PointerTool.STYLUS
+                    MotionEvent.TOOL_TYPE_ERASER -> TouchArbiter.PointerTool.ERASER
+                    else -> TouchArbiter.PointerTool.OTHER
+                },
+                x = event.getX(index),
+                y = event.getY(index),
+                touchMajor = event.getTouchMajor(index),
+                touchMinor = event.getTouchMinor(index),
+            )
+        }
+        val actionIndex = event.actionIndex.coerceIn(0, count - 1)
+        return TouchArbiter.Frame(
+            action = action,
+            actionPointerId = event.getPointerId(actionIndex),
+            eventTime = event.eventTime,
+            pointers = pointers,
+        )
+    }
+
+    private fun applyInputEffects(
+        event: MotionEvent,
+        effects: List<TouchArbiter.Effect>,
+    ) {
+        for (effect in effects) {
+            when (effect) {
+                is TouchArbiter.Effect.PanStart -> startPan(event, effect)
+                is TouchArbiter.Effect.Pan -> {
+                    velocity.addMovement(event)
+                    applyPan(effect.dx, effect.dy)
+                }
+                is TouchArbiter.Effect.PanEnd -> endPan(event, effect)
+                TouchArbiter.Effect.PanCancel -> cancelPan()
+                is TouchArbiter.Effect.PinchStart -> {
+                    pinchBaseZoom = zoom
+                    frozenPinchBucket = renderZoomBucket()
+                    lastTapTime = 0L
+                    if (touchLogging) {
+                        Log.d(
+                            TOUCH_TAG,
+                            "pinch begin at=%.0f,%.0f zoom=%.3f".format(
+                                effect.focusX,
+                                effect.focusY,
+                                zoom,
+                            ),
+                        )
+                    }
+                }
+                is TouchArbiter.Effect.Pinch -> applyPinch(effect)
+                TouchArbiter.Effect.PinchEnd -> {
+                    scheduleViewportReport()
+                    invalidate()
+                    if (touchLogging) Log.d(TOUCH_TAG, "pinch end zoom=$zoom")
+                }
+                is TouchArbiter.Effect.Tap -> {
+                    if (touchLogging) {
+                        Log.d(TOUCH_TAG, "tap at=${effect.x.toInt()},${effect.y.toInt()}")
+                    }
+                    handleTap(effect.x, effect.y, effect.eventTime)
+                }
+                is TouchArbiter.Effect.DirectMove -> updateTransformGesture(effect.x, effect.y)
+                is TouchArbiter.Effect.DirectEnd -> {
+                    if (movingSelection || scalingSelection) {
+                        finishTransformGesture(effect.cancelled)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startPan(event: MotionEvent, start: TouchArbiter.Effect.PanStart) {
+        abortFling()
+        lastTapTime = 0L
+        panAxis = if (maxPan() > 0f && abs(start.totalDx) > abs(start.totalDy) * 1.25f) {
+            PanAxis.HORIZONTAL
+        } else {
+            PanAxis.VERTICAL
+        }
+        // The movement that armed the pan is spent, not applied: rebasing here is what prevents the
+        // page from jumping by a touch slop the instant the gesture becomes a drag.
+        manualScrollStartPage = if (panAxis == PanAxis.VERTICAL) readingPage() else -1
+        fingerDownScrollY = scrollY
+        fingerDragExtent = 0f
+        velocity.clear()
+        velocity.addMovement(event)
+        if (touchLogging) {
+            Log.d(
+                TOUCH_TAG,
+                "pan start axis=$panAxis moved=%.0f,%.0f".format(start.totalDx, start.totalDy),
+            )
+        }
+    }
+
+    private fun applyPan(dx: Float, dy: Float) {
+        when (panAxis) {
+            PanAxis.VERTICAL -> {
+                fingerDragExtent += abs(dy)
+                scrollY = (scrollY - dy * scrollSpeed).coerceIn(0f, maxScroll())
+                revealScrollbarAfterPageCrossing()
+                scheduleViewportReport()
+                invalidate()
+            }
+            PanAxis.HORIZONTAL -> {
+                fingerDragExtent += abs(dx)
+                panX = (panX + dx * scrollSpeed).coerceIn(-maxPan(), maxPan())
+                invalidate()
+            }
+            PanAxis.NONE -> Unit
+        }
+    }
+
+    private fun endPan(event: MotionEvent, end: TouchArbiter.Effect.PanEnd) {
+        velocity.addMovement(event)
+        var flingVelocity = 0f
+        if (panAxis == PanAxis.VERTICAL) {
+            velocity.computeCurrentVelocity(1000)
+            flingVelocity = velocity.yVelocity
+            if (abs(flingVelocity) > FLING_MIN_VELOCITY) fling(flingVelocity * scrollSpeed)
+        }
+        revealScrollbarAfterPageCrossing()
+        if (scroller.isFinished) {
+            manualScrollStartPage = -1
+            scheduleScrollbarHide()
+        }
+        if (touchLogging) {
+            Log.d(
+                TOUCH_TAG,
+                "finger up moved=${fingerDragExtent.toInt()}px " +
+                    "scrolled=${(scrollY - fingerDownScrollY).toInt()}px " +
+                    "fling=${flingVelocity.toInt()} at=${end.x.toInt()},${end.y.toInt()}",
+            )
+        }
+        panAxis = PanAxis.NONE
+        velocity.clear()
+        reportViewport()
+    }
+
+    private fun cancelPan() {
+        abortFling()
+        panAxis = PanAxis.NONE
+        velocity.clear()
+        manualScrollStartPage = -1
+        scheduleScrollbarHide()
+        scheduleViewportReport()
+    }
+
+    private fun applyPinch(effect: TouchArbiter.Effect.Pinch) {
+        if (effect.spanRatio <= 0f) return
+        val adjusted = exp(ln(effect.spanRatio.toDouble()) * zoomSpeed.toDouble()).toFloat()
+        val target = (pinchBaseZoom * adjusted).coerceIn(MIN_ZOOM, MAX_ZOOM)
+        if (abs(target - zoom) < 0.0005f) return
+        zoomAround(effect.focusX, effect.focusY, target)
+        if (touchLogging) {
+            Log.d(
+                TOUCH_TAG,
+                "pinch ratio=%.3f target=%.3f zoom=%.3f".format(effect.spanRatio, target, zoom),
+            )
+        }
+    }
+
+    /**
+     * Finger-driven lasso movement is a direct manipulation rather than a pan. It must be claimed
+     * explicitly so it owns the single contact; a second finger or the stylus cancels and reverts it.
+     */
+    private fun claimDirectSelection(event: MotionEvent) {
+        if (tool != PenTool.LASSO || selectedStrokes.isEmpty()) return
+        if (inputArbiter.state != TouchArbiter.State.CANDIDATE) return
+        val pointerId = event.getPointerId(0)
+        if (!beginSelectionGesture(event.x, event.y)) return
+        if (inputArbiter.claimDirect(pointerId)) {
+            transformPointerId = pointerId
+            lastTapTime = 0L
+            manualScrollStartPage = -1
+            logTouch(event, "selection drag")
+        } else {
+            finishTransformGesture(cancelled = true)
+        }
+    }
+
+    override fun onHoverEvent(event: MotionEvent): Boolean {
+        val tool = event.getToolType(0)
+        if (tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER) {
+            handleStylusButtonState(event)
+            val near = when (event.actionMasked) {
+                MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> true
+                MotionEvent.ACTION_HOVER_EXIT -> false
+                else -> null
+            }
+            if (near != null) {
+                if (near) lastTapTime = 0L
+                applyInputEffects(event, inputArbiter.onHover(near))
+                if (touchLogging && event.actionMasked == MotionEvent.ACTION_HOVER_ENTER) {
+                    Log.d(
+                        TOUCH_TAG,
+                        "pen hover enter distance=${event.getAxisValue(MotionEvent.AXIS_DISTANCE)}",
+                    )
+                } else if (touchLogging && event.actionMasked == MotionEvent.ACTION_HOVER_EXIT) {
+                    Log.d(TOUCH_TAG, "pen hover exit")
+                }
             }
             return true
         }
-        if (liveStroke != null || erasing || lassoPoints != null) {
-            // The pen owns the gesture; palm and finger contacts are ignored until it lifts.
-            return true
-        }
-        return handleFinger(event)
+        return super.onHoverEvent(event)
     }
 
-    private fun resetTouchGuard() {
-        rejectFingerGesture = false
-        rejectMultiTouch = false
-        pinchCandidate = false
-        firstFingerDownAt = 0L
-    }
-
-    private fun isPalmLike(event: MotionEvent, index: Int): Boolean {
-        if (index !in 0 until event.pointerCount) return true
-        val tool = event.getToolType(index)
-        if (tool != MotionEvent.TOOL_TYPE_FINGER) return false
-
-        // Some tablet drivers expose a palm as an oversized finger instead of a dedicated tool
-        // type, so use the contact geometry as the portable palm-rejection signal.
-        val major = event.getTouchMajor(index)
-        val minor = event.getTouchMinor(index)
-        val size = event.getSize(index)
-        return size >= 0.76f ||
-            major >= 72f * density ||
-            minor >= 54f * density
-    }
-
-    private fun canStartPinch(event: MotionEvent): Boolean {
-        if (event.pointerCount != 2) return false
-        if (firstFingerDownAt == 0L || event.eventTime - firstFingerDownAt > 420L) return false
-        if (isPalmLike(event, 0) || isPalmLike(event, 1)) return false
-        if (event.getToolType(0) != MotionEvent.TOOL_TYPE_FINGER ||
-            event.getToolType(1) != MotionEvent.TOOL_TYPE_FINGER
-        ) return false
-        val dx = event.getX(1) - event.getX(0)
-        val dy = event.getY(1) - event.getY(0)
-        return hypot(dx, dy) >= 28f * density
+    private fun logTouch(event: MotionEvent, decision: String) {
+        if (!touchLogging) return
+        val index = event.actionIndex.coerceIn(0, event.pointerCount - 1)
+        Log.d(
+            TOUCH_TAG,
+            "action=${event.actionMasked} pointers=${event.pointerCount} " +
+                "tool=${event.getToolType(index)} size=${"%.2f".format(event.getSize(index))} " +
+                "major=${"%.1f".format(event.getTouchMajor(index))} " +
+                "minor=${"%.1f".format(event.getTouchMinor(index))} " +
+                "at=${event.getX(index).toInt()},${event.getY(index).toInt()} " +
+                "-> $decision",
+        )
     }
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
@@ -1319,7 +1702,10 @@ class PdfPageView(context: Context) : View(context) {
     /** Standard stylus side-button (USI/other pens); the Focus Pen Pro uses F19 instead. */
     private fun handleStylusButtonState(event: MotionEvent) {
         val stylusSource = (event.source and android.view.InputDevice.SOURCE_STYLUS) != 0 ||
-            event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS
+            (0 until event.pointerCount).any { pointer ->
+                val tool = event.getToolType(pointer)
+                tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER
+            }
         if (!stylusSource) return
         val pressed = event.isButtonPressed(MotionEvent.BUTTON_STYLUS_PRIMARY) ||
             event.isButtonPressed(MotionEvent.BUTTON_STYLUS_SECONDARY)
@@ -1327,24 +1713,41 @@ class PdfPageView(context: Context) : View(context) {
         stylusButtonDown = pressed
     }
 
-    private fun handleStylus(event: MotionEvent) {
-        lastPenEventTime = SystemClock.uptimeMillis()
-        if (event.pointerCount != 1 || sizes.isEmpty()) {
-            when (event.actionMasked) {
-                MotionEvent.ACTION_UP -> finishPenGesture(cancelled = false)
-                MotionEvent.ACTION_CANCEL -> finishPenGesture(cancelled = true)
-            }
+    /**
+     * [index] is the pointer that carries the stylus. It is not always pointer 0: when a hand is
+     * already resting on the screen, the pen arrives as an extra pointer via ACTION_POINTER_DOWN.
+     *
+     * The arbiter has already ended any finger gesture and rejected the remaining contacts before
+     * this runs, so this function only owns the ink/eraser/lasso side of the stylus gesture.
+     */
+    private fun handleStylus(event: MotionEvent, index: Int) {
+        val action = event.actionMasked
+        if (action == MotionEvent.ACTION_CANCEL) {
+            finishPenGesture(cancelled = true)
             return
         }
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
+        val penDown = action == MotionEvent.ACTION_DOWN ||
+            (action == MotionEvent.ACTION_POINTER_DOWN && event.actionIndex == index)
+        val penUp = action == MotionEvent.ACTION_UP ||
+            (action == MotionEvent.ACTION_POINTER_UP && event.actionIndex == index)
+        if (sizes.isEmpty()) {
+            if (penUp) finishPenGesture(cancelled = false)
+            return
+        }
+        val x = event.getX(index)
+        val y = event.getY(index)
+        when {
+            penDown -> {
                 abortFling()
-                dragMode = DragMode.NONE
+                panAxis = PanAxis.NONE
+                manualScrollStartPage = -1
+                lastTapTime = 0L
                 velocity.clear()
-                val eraserTip = event.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER
+                val eraserTip = event.getToolType(index) == MotionEvent.TOOL_TYPE_ERASER
                 if (autoMarkerArmed && !eraserTip) {
-                    // First pen contact after opening this PDF: when nothing is selected yet, start
-                    // with the marker (pen) and its first preset, so this very stroke uses it.
+                    // Only a document opened with no tool chosen falls back to the marker. Once the
+                    // user picked a pen/highlighter and a preset, that choice is respected across
+                    // documents; the preset already set in the view is used for this stroke.
                     autoMarkerArmed = false
                     if (tool == PenTool.NONE) {
                         onAutoMarker?.invoke()?.let { marker ->
@@ -1357,30 +1760,27 @@ class PdfPageView(context: Context) : View(context) {
                     eraserTip || tool == PenTool.ERASER -> {
                         erasing = true
                         session?.beginErase()
-                        eraseAt(event.x, event.y)
+                        eraseAt(x, y)
                     }
 
                     tool == PenTool.NONE -> Unit
-                    tool == PenTool.LASSO -> beginLassoOrMove(event.x, event.y)
-                    else -> startStroke(event.x, event.y, event.pressure)
+                    tool == PenTool.LASSO -> beginLassoOrMove(x, y)
+                    else -> startStroke(x, y, event.getPressure(index))
                 }
                 invalidate()
             }
 
-            MotionEvent.ACTION_MOVE -> {
-                when {
-                    erasing -> eraseAt(event.x, event.y)
-                    tool == PenTool.LASSO -> updateLassoOrMove(event.x, event.y)
-                    liveStroke != null -> {
-                        appendHistory(event)
-                        appendPoint(event.x, event.y, event.pressure)
-                        invalidate()
-                    }
+            penUp -> finishPenGesture(cancelled = false, endX = x, endY = y)
+
+            action == MotionEvent.ACTION_MOVE -> when {
+                erasing -> eraseAt(x, y)
+                tool == PenTool.LASSO -> updateLassoOrMove(x, y)
+                liveStroke != null -> {
+                    appendHistory(event, index)
+                    appendPoint(x, y, event.getPressure(index))
+                    invalidate()
                 }
             }
-
-            MotionEvent.ACTION_UP -> finishPenGesture(cancelled = false, endX = event.x, endY = event.y)
-            MotionEvent.ACTION_CANCEL -> finishPenGesture(cancelled = true)
         }
     }
 
@@ -1388,19 +1788,32 @@ class PdfPageView(context: Context) : View(context) {
         val hit = mapToPage(x, y) ?: return
         if (hit.yPt < 0f || hit.yPt > sizes[hit.page].height) return
         val highlighter = tool == PenTool.HIGHLIGHTER
+        val pageEdge = pageLongEdge(hit.page)
         liveStroke = Stroke(
             id = UUID.randomUUID().toString(),
             page = hit.page,
             color = preset.color,
-            width = preset.width,
-            highlighter = highlighter
+            // The preset is page-independent; this page decides its actual size in points.
+            width = brushWidthToPagePt(preset.width, pageEdge),
+            highlighter = highlighter,
+            baseWidth = preset.width,
         ).also { it.add(InkPoint(hit.xPt, hit.yPt, pressure.coerceIn(0.05f, 1f))) }
         inkStabilizer.start(x, y, StrokeStabilizer.radiusFor(stabilizerStrength, density))
     }
 
-    private fun appendHistory(event: MotionEvent) {
-        for (index in 0 until event.historySize) {
-            appendPoint(event.getHistoricalX(0, index), event.getHistoricalY(0, index), event.getHistoricalPressure(0, index))
+    /** Long edge of a page in points; the reference for every page-relative brush size. */
+    fun pageLongEdge(page: Int): Float {
+        val size = sizes.getOrNull(page) ?: return REFERENCE_PAGE_LONG_EDGE_PT
+        return maxOf(size.width, size.height).coerceAtLeast(1f)
+    }
+
+    private fun appendHistory(event: MotionEvent, index: Int) {
+        for (history in 0 until event.historySize) {
+            appendPoint(
+                event.getHistoricalX(index, history),
+                event.getHistoricalY(index, history),
+                event.getHistoricalPressure(index, history),
+            )
         }
     }
 
@@ -1416,9 +1829,11 @@ class PdfPageView(context: Context) : View(context) {
         eraserPage = hit.page
         eraserX = hit.xPt
         eraserY = hit.yPt
-        val changed = session?.eraseAt(hit.page, hit.xPt, hit.yPt, eraserWidthPt / 2f, eraserPixel) ?: false
-        if (changed) invalidate()
-        else invalidate()
+        // One eraser preset therefore removes the same relative area on every page size.
+        val tipPt = brushWidthToPagePt(eraserWidth, pageLongEdge(hit.page))
+        eraserTipPt = tipPt
+        session?.eraseAt(hit.page, hit.xPt, hit.yPt, tipPt / 2f, eraserPixel)
+        invalidate()
     }
 
     private fun finishPenGesture(
@@ -1522,169 +1937,13 @@ class PdfPageView(context: Context) : View(context) {
         return inside
     }
 
-    private fun handleFinger(event: MotionEvent): Boolean {
-        val now = SystemClock.uptimeMillis()
-        if (event.actionMasked == MotionEvent.ACTION_DOWN && now - lastPenEventTime < PALM_WINDOW_MS) {
-            return true
-        }
-        if (movingSelection || scalingSelection) {
-            val index = event.findPointerIndex(transformPointerId)
-            if (index < 0) return true
-            val x = event.getX(index)
-            val y = event.getY(index)
-            when (event.actionMasked) {
-                MotionEvent.ACTION_MOVE -> updateTransformGesture(x, y)
-                MotionEvent.ACTION_UP -> finishTransformGesture(false)
-                MotionEvent.ACTION_CANCEL -> finishTransformGesture(true)
-            }
-            return true
-        }
-        if (tool == PenTool.LASSO && event.actionMasked == MotionEvent.ACTION_DOWN &&
-            event.pointerCount == 1 && selectedStrokes.isNotEmpty()
-        ) {
-            if (beginSelectionGesture(event.x, event.y)) {
-                transformPointerId = event.getPointerId(0)
-                abortFling()
-                dragMode = DragMode.NONE
-                return true
-            }
-        }
-
-        if (event.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
-            pinchCandidate = canStartPinch(event)
-            rejectMultiTouch = !pinchCandidate
-            if (rejectMultiTouch) dragMode = DragMode.NONE
-        }
-        scaleDetector.onTouchEvent(event)
-        if (rejectMultiTouch) {
-            if (event.actionMasked == MotionEvent.ACTION_UP ||
-                event.actionMasked == MotionEvent.ACTION_CANCEL
-            ) {
-                resetTouchGuard()
-                dragMode = DragMode.NONE
-            }
-            return true
-        }
-        if (dragMode == DragMode.PINCH) {
-            if (event.actionMasked == MotionEvent.ACTION_POINTER_UP) {
-                // Continue with the finger that is still down, without a positional jump.
-                val remaining = if (event.actionIndex == 0) 1 else 0
-                lastX = event.getX(remaining)
-                lastY = event.getY(remaining)
-                downX = lastX
-                downY = lastY
-                dragMode = DragMode.UNDECIDED
-                scheduleViewportReport()
-            }
-            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
-                dragMode = DragMode.NONE
-            }
-            return true
-        }
-
-        val pointerIndex = if (activePointerId == MotionEvent.INVALID_POINTER_ID) 0
-        else event.findPointerIndex(activePointerId).coerceAtLeast(0)
-        val x = event.getX(pointerIndex)
-        val y = event.getY(pointerIndex)
-
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                abortFling()
-                activePointerId = event.getPointerId(0)
-                downX = x
-                downY = y
-                lastX = x
-                lastY = y
-                dragMode = DragMode.UNDECIDED
-                manualScrollStartPage = readingPage()
-                velocity.clear()
-                velocity.addMovement(event)
-            }
-
-            MotionEvent.ACTION_POINTER_DOWN -> {
-                abortFling()
-                if (pinchCandidate) dragMode = DragMode.PINCH
-            }
-
-            MotionEvent.ACTION_MOVE -> {
-                if (scaleDetector.isInProgress) return true
-                if (dragMode == DragMode.UNDECIDED) {
-                    val dx = x - downX
-                    val dy = y - downY
-                    if (hypot(dx, dy) > touchSlop) {
-                        dragMode = if (maxPan() > 0f && abs(dx) > abs(dy) * 1.25f) {
-                            DragMode.HORIZONTAL
-                        } else {
-                            DragMode.VERTICAL
-                        }
-                    }
-                }
-                when (dragMode) {
-                    DragMode.VERTICAL -> {
-                        scrollY = (scrollY - (y - lastY) * scrollSpeed).coerceIn(0f, maxScroll())
-                        revealScrollbarAfterPageCrossing()
-                        scheduleViewportReport()
-                        invalidate()
-                    }
-
-                    DragMode.HORIZONTAL -> {
-                        panX = (panX + (x - lastX) * scrollSpeed).coerceIn(-maxPan(), maxPan())
-                        invalidate()
-                    }
-
-                    else -> Unit
-                }
-                lastX = x
-                lastY = y
-                velocity.addMovement(event)
-            }
-
-            MotionEvent.ACTION_POINTER_UP -> {
-                if (event.actionIndex != pointerIndex) {
-                    // A secondary finger lifted; keep tracking the original one.
-                    lastX = x
-                    lastY = y
-                }
-            }
-
-            MotionEvent.ACTION_UP -> {
-                val tap = dragMode == DragMode.UNDECIDED &&
-                    hypot(x - downX, y - downY) < touchSlop
-                if (dragMode == DragMode.VERTICAL) {
-                    velocity.computeCurrentVelocity(1000)
-                    val vy = velocity.yVelocity
-                    if (abs(vy) > 400f) fling(vy * scrollSpeed)
-                }
-                revealScrollbarAfterPageCrossing()
-                if (scroller.isFinished) {
-                    manualScrollStartPage = -1
-                    scheduleScrollbarHide()
-                }
-                if (tap) handleTap(x, y, event.eventTime)
-                activePointerId = MotionEvent.INVALID_POINTER_ID
-                dragMode = DragMode.NONE
-                resetTouchGuard()
-                reportViewport()
-            }
-
-            MotionEvent.ACTION_CANCEL -> {
-                activePointerId = MotionEvent.INVALID_POINTER_ID
-                dragMode = DragMode.NONE
-                manualScrollStartPage = -1
-                scheduleScrollbarHide()
-                resetTouchGuard()
-                reportViewport()
-            }
-        }
-        return true
-    }
-
     private fun handleTap(x: Float, y: Float, time: Long) {
         val isDouble = time - lastTapTime < 320L &&
             hypot(x - lastTapX, y - lastTapY) < 110f * density
         if (isDouble) {
             lastTapTime = 0L
             val target = if (zoom < 1.7f) (zoom * 2f).coerceAtMost(MAX_ZOOM) else 1f
+            if (touchLogging) Log.d(TOUCH_TAG, "double tap zoom ${zoom} -> $target")
             zoomAround(x, y, target)
         } else {
             lastTapTime = time
@@ -1714,7 +1973,7 @@ class PdfPageView(context: Context) : View(context) {
             emitScrollbarState()
             scheduleViewportReport()
             postInvalidateOnAnimation()
-        } else if (manualScrollStartPage >= 0 && activePointerId == MotionEvent.INVALID_POINTER_ID) {
+        } else if (manualScrollStartPage >= 0 && !inputArbiter.panning) {
             revealScrollbarAfterPageCrossing()
             manualScrollStartPage = -1
             scheduleScrollbarHide()
@@ -1771,6 +2030,14 @@ class PdfPageView(context: Context) : View(context) {
     fun pageCount(): Int = sizes.size
     fun currentZoom(): Float = zoom
 
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (!hasWindowFocus) {
+            // No ACTION_CANCEL is guaranteed when focus moves to a dialog/system window.
+            resetInputState()
+        }
+    }
+
     override fun onDetachedFromWindow() {
         reportViewport()
         closeDocument()
@@ -1780,9 +2047,27 @@ class PdfPageView(context: Context) : View(context) {
     override fun onWindowVisibilityChanged(visibility: Int) {
         super.onWindowVisibilityChanged(visibility)
         if (visibility != VISIBLE) {
-            // Home / recents / screen off: keep the reading position and push pending ink to disk.
+            // Home / recents / screen off: stop any gesture, keep the reading position and push
+            // pending ink to disk.
+            resetInputState()
             reportViewport()
             session?.flush()
         }
+    }
+
+    /**
+     * Drops every in-flight contact without applying viewport motion. A cancelled stroke is
+     * discarded rather than committed, and a selection transform is reverted.
+     */
+    private fun resetInputState() {
+        inputArbiter.reset()
+        abortFling()
+        finishPenGesture(cancelled = true)
+        if (movingSelection || scalingSelection) finishTransformGesture(cancelled = true)
+        panAxis = PanAxis.NONE
+        velocity.clear()
+        lastTapTime = 0L
+        manualScrollStartPage = -1
+        scheduleScrollbarHide()
     }
 }

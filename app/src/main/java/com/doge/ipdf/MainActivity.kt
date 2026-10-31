@@ -54,6 +54,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -122,11 +123,15 @@ class MainActivity : ComponentActivity() {
         val ready = MiuiTouchFilm.init(this) { function ->
             runOnUiThread { onTouchFilmFunction(function) }
         }
-        if (ready) android.util.Log.i("PenButton", "Xiaomi touch-film SDK ready")
+        if (ready && BuildConfig.DEBUG) {
+            android.util.Log.i("PenButton", "Xiaomi touch-film SDK ready")
+        }
     }
 
     private fun onTouchFilmFunction(function: Int) {
-        android.util.Log.i("PenButton", "touch-film function=$function")
+        if (BuildConfig.DEBUG) {
+            android.util.Log.i("PenButton", "touch-film function=$function")
+        }
         when (function) {
             // "Switch between brush and eraser" and "switch to previous brush" both drive the
             // single-press path. A quick second button press is interpreted by PenSettings as the
@@ -160,7 +165,9 @@ class MainActivity : ComponentActivity() {
             event.keyCode == KeyEvent.KEYCODE_STYLUS_BUTTON_TAIL
         if (isPenButton) {
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                android.util.Log.i("PenButton", "raw key=${event.keyCode} device=${event.deviceId}")
+                if (BuildConfig.DEBUG) {
+                    android.util.Log.i("PenButton", "raw key=${event.keyCode} device=${event.deviceId}")
+                }
                 penSettings.handleStylusButtonPress()
             }
             return true
@@ -221,9 +228,8 @@ private fun ReaderApp(
     }
 
     fun openDocument(uriString: String, name: String) {
-        // Opening a document starts with no tool selected; the first stylus contact picks the
-        // marker. This also applies when switching back and forth between documents.
-        penSettings.clearTool()
+        // The pen tool and its preset survive document switches: the user's last brush is what they
+        // expect to keep writing with, instead of being reset to the first preset.
         tabs = (tabs - uriString + uriString).takeLast(12)
         selectedUri = uriString
         RecentDocuments.save(context, tabs)
@@ -242,10 +248,7 @@ private fun ReaderApp(
         val wasActive = selectedUri == closed
         val updated = tabs - closed
         tabs = updated
-        if (wasActive) {
-            selectedUri = updated.lastOrNull()
-            if (selectedUri != null) penSettings.clearTool()
-        }
+        if (wasActive) selectedUri = updated.lastOrNull()
         RecentDocuments.save(context, updated)
     }
 
@@ -263,7 +266,6 @@ private fun ReaderApp(
         val updated = tabs.filterNot { it in closing }
         tabs = updated
         selectedUri = if (active in updated) active else updated.lastOrNull()
-        if (selectedUri != null) penSettings.clearTool()
         RecentDocuments.save(context, updated)
     }
 
@@ -369,10 +371,7 @@ private fun ReaderApp(
                             tabs = tabs,
                             uriString = document,
                             penSettings = penSettings,
-                            onSelectTab = { target ->
-                                penSettings.clearTool()
-                                selectedUri = target
-                            },
+                            onSelectTab = { target -> selectedUri = target },
                             onCloseTab = ::closeSingleTab,
                             onCloseTabs = ::closeTabGroup,
                             onHome = { selectedUri = null },
@@ -470,6 +469,58 @@ private fun StorageAccessDialog(
 
 private enum class TabCloseAction { ALL, OTHERS, LEFT, RIGHT }
 
+/** Pushes the current pen/tool state into the page view; used by both factory and update. */
+private fun syncPenToView(
+    view: PdfPageView?,
+    tool: PenTool,
+    preset: BrushPreset,
+    eraserWidth: Float,
+    eraserPixel: Boolean,
+    stabilizer: Float,
+    zoomSpeed: Float,
+    scrollSpeed: Float,
+) {
+    if (view == null) return
+    view.tool = tool
+    view.preset = preset
+    view.eraserWidth = eraserWidth
+    view.eraserPixel = eraserPixel
+    view.stabilizerStrength = stabilizer
+    view.zoomSpeed = zoomSpeed
+    view.scrollSpeed = scrollSpeed
+    view.invalidate()
+}
+
+/**
+ * Points the single page view at [session]'s document. Called from the AndroidView update block,
+ * which also runs for the very first composition, so one code path covers both the initial open and
+ * every tab switch.
+ *
+ * The session is attached after the new document has been opened: [PdfPageView.closeDocument]
+ * reports the outgoing document's viewport to the attached session, which must therefore still be
+ * the old one while the switch is in progress.
+ */
+private fun bindDocument(
+    view: PdfPageView,
+    session: ReaderSession,
+    pristine: java.io.File,
+    epoch: Int,
+) {
+    if (view.boundSession === session && view.boundEpoch == epoch) return
+    view.boundSession = session
+    view.boundEpoch = epoch
+    runCatching {
+        view.openDocument(pristine, session.savedViewport(), session.pageSizes)
+    }
+    // Even when the renderer could not be created the session is attached: the view then draws an
+    // explicit message instead of an empty dark page, and the next switch can retry.
+    view.attachSession(session)
+    view.onViewportChanged = { session.onViewportChanged(it) }
+    // Restored strokes were sized for the page's long edge; do it once the real page geometry is
+    // known instead of from the page-height probe.
+    session.applyPageGeometry(view.pageCount()) { view.pageLongEdge(it) }
+}
+
 @Composable
 private fun ReaderScreen(
     tabs: List<String>,
@@ -487,6 +538,23 @@ private fun ReaderScreen(
     val session = remember(uriString) { ReaderSession.of(context, uri) }
     val scope = rememberCoroutineScope()
     val topBarPx = with(LocalDensity.current) { 54.dp.roundToPx() }
+
+    // Bumped when the pristine copy is replaced, which invalidates the renderer's file handle.
+    var readerEpoch by remember(session) { mutableIntStateOf(0) }
+    // Subscribe to ink/tool changes so the View repaints after undo/redo/erase from the dock.
+    val pageView = remember { mutableStateOf<PdfPageView?>(null) }
+    DisposableEffect(session) {
+        session.onReimport = { readerEpoch++ }
+        onDispose {
+            session.onReimport = null
+            // The page view outlives this effect: switching tabs re-keys it while the same
+            // AndroidView instance stays in the composition, and Compose disposes the old effect
+            // after the new document was already bound. Releasing it here shut down its render
+            // executor, so the freshly opened document never rendered a page (black screen).
+            // The view is released by AndroidView's onRelease when it really leaves the screen.
+            session.flushJournal()
+        }
+    }
 
     fun afterFlush(action: suspend () -> Unit) {
         scope.launch {
@@ -506,16 +574,14 @@ private fun ReaderScreen(
         }
     }
 
-    DisposableEffect(session) {
-        onDispose { session.flushJournal() }
-    }
-
-    // Subscribe to ink/tool changes so the View repaints after undo/redo/erase from the dock.
-    val pageView = remember { mutableStateOf<PdfPageView?>(null) }
     val inkRevision = session.inkRevision
+    // Keep the tool and preset the user last used: switching documents or tabs must not reset the
+    // pen back to the first preset. Only the very first document of a fresh install picks the
+    // marker automatically (tool == NONE, which only happens when no tool was chosen yet).
     val tool = penSettings.tool
     val preset = penSettings.activePreset
     val eraserWidth = penSettings.eraserWidth
+    // Each eraser preset keeps its own erase mode, so this follows the selected tip.
     val eraserPixel = penSettings.eraserMode == EraserMode.PIXEL
     val stabilizer = penSettings.stabilizer
     val zoomSpeed = penSettings.zoomSpeed
@@ -526,20 +592,16 @@ private fun ReaderScreen(
     var scrollbarState by remember { mutableStateOf(ScrollbarState()) }
 
     LaunchedEffect(inkRevision, tool, preset, eraserWidth, eraserPixel, stabilizer, zoomSpeed, scrollSpeed) {
-        pageView.value?.let { view ->
-            view.tool = tool
-            view.preset = preset
-            view.eraserWidthPt = eraserWidth
-            view.eraserPixel = eraserPixel
-            view.stabilizerStrength = stabilizer
-            view.zoomSpeed = zoomSpeed
-            view.scrollSpeed = scrollSpeed
-            view.invalidate()
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose { pageView.value = null }
+        syncPenToView(
+            pageView.value,
+            tool,
+            preset,
+            eraserWidth,
+            eraserPixel,
+            stabilizer,
+            zoomSpeed,
+            scrollSpeed,
+        )
     }
 
     Box(
@@ -548,44 +610,52 @@ private fun ReaderScreen(
             .onSizeChanged { readerSize = it }
     ) {
         val pristine = session.pristineFile()
-        if (session.ready && pristine != null) {
-            key(uriString) {
-                AndroidView(
-                    factory = { ctx ->
-                        PdfPageView(ctx).apply {
-                            attachSession(session)
-                            setTopInset(topBarPx)
-                            this.zoomSpeed = zoomSpeed
-                            this.scrollSpeed = scrollSpeed
-                            onViewportChanged = { session.onViewportChanged(it) }
-                            onScrollbarChanged = { scrollbarState = it }
-                            onStylusButton = { penSettings.handleStylusButtonPress() }
-                            onAutoMarker = {
-                                penSettings.selectTool(PenTool.PEN)
-                                penSettings.selectPreset(0)
-                                penSettings.penPresets.firstOrNull()
-                            }
-                            pageView.value = this
-                            runCatching {
-                                openDocument(pristine, session.savedViewport(), session.pageSizes)
-                            }
-                        }
-                    },
-                    update = { view ->
-                        view.setTopInset(topBarPx)
-                        view.tool = tool
-                        view.preset = preset
-                        view.eraserWidthPt = eraserWidth
-                        view.eraserPixel = eraserPixel
-                        view.stabilizerStrength = stabilizer
-                        view.zoomSpeed = zoomSpeed
-                        view.scrollSpeed = scrollSpeed
-                        view.invalidate()
-                    },
-                    onRelease = { view -> view.release() },
-                    modifier = Modifier.fillMaxSize()
+        // The page view is composed for the whole reader screen, including while a newly selected
+        // session still prepares its pristine copy. It used to live inside the "session ready"
+        // branch, so every tab switch removed it: that created a second view and, worse, the
+        // outgoing session's DisposableEffect released the already re-bound new view, closing the
+        // renderer it had just opened and leaving a dark page. Only the document inside the view is
+        // swapped now.
+        AndroidView(
+            factory = { ctx ->
+                PdfPageView(ctx).apply {
+                    setTopInset(topBarPx)
+                    onScrollbarChanged = { scrollbarState = it }
+                    onAutoMarker = {
+                        // First contact ever with no tool chosen: start on the marker. An
+                        // already chosen pen or preset is kept as it is.
+                        penSettings.selectTool(PenTool.PEN)
+                        penSettings.penPresets.getOrNull(0)
+                    }
+                    onStylusButton = { penSettings.handleStylusButtonPress() }
+                    pageView.value = this
+                }
+            },
+            update = { view ->
+                view.setTopInset(topBarPx)
+                syncPenToView(
+                    view,
+                    tool,
+                    preset,
+                    eraserWidth,
+                    eraserPixel,
+                    stabilizer,
+                    zoomSpeed,
+                    scrollSpeed,
                 )
-            }
+                // Runs for the first composition and after every document switch. The view skips
+                // work when the same file is already open.
+                if (session.ready && pristine != null) {
+                    bindDocument(view, session, pristine, readerEpoch)
+                }
+            },
+            onRelease = { view ->
+                view.release()
+                if (pageView.value === view) pageView.value = null
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+        if (session.ready && pristine != null) {
             ReaderTopBar(
                 tabs = tabs,
                 activeUri = uriString,
@@ -629,8 +699,11 @@ private fun ReaderScreen(
                 modifier = Modifier.fillMaxSize(),
             )
         } else if (!session.ready) {
+            // The page view is kept below this overlay so a tab switch keeps its renderer alive.
             Column(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -638,9 +711,11 @@ private fun ReaderScreen(
                 Text("Opening document…", modifier = Modifier.padding(top = 12.dp))
             }
         } else {
+            // The session could not prepare the document (missing permission, unreadable file).
             Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
                     .padding(32.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally

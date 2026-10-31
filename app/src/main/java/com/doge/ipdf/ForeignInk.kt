@@ -9,6 +9,7 @@ import com.tom_roush.pdfbox.pdmodel.PDDocument
 import java.io.File
 import java.io.InputStream
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
@@ -62,9 +63,13 @@ object ForeignInkReader {
             for (i in 0 until annots.size()) {
                 val dict = annots.getObject(i) as? COSDictionary ?: continue
                 if (PdfInkExporter.isOurInk(dict)) continue
+                // The page long edge turns the annotation's absolute width into the page-relative
+                // width this app now stores, so adopted ink keeps its on-page thickness.
+                val pageLongEdgePt = max(crop.width, crop.height)
                 when (dict.getNameAsString(COSName.SUBTYPE)) {
-                    "Ink" -> addInk(dict, pageIndex, i, left, bottom, height, result)
-                    "Highlight" -> addHighlight(dict, pageIndex, i, left, bottom, height, result)
+                    "Ink" -> addInk(dict, pageIndex, i, left, bottom, height, pageLongEdgePt, result)
+                    "Highlight" ->
+                        addHighlight(dict, pageIndex, i, left, bottom, height, pageLongEdgePt, result)
                 }
             }
         }
@@ -78,6 +83,7 @@ object ForeignInkReader {
         left: Float,
         bottom: Float,
         height: Float,
+        pageLongEdgePt: Float,
         target: MutableList<Stroke>
     ) {
         val inkList = dict.getDictionaryObject(COSName.getPDFName("InkList")) as? COSArray ?: return
@@ -93,7 +99,8 @@ object ForeignInkReader {
                 page = page,
                 color = color,
                 width = width,
-                highlighter = highlighter
+                highlighter = highlighter,
+                baseWidth = width * REFERENCE_PAGE_LONG_EDGE_PT / pageLongEdgePt.coerceAtLeast(1f),
             )
             stroke.points.addAll(points)
             target.add(stroke)
@@ -107,6 +114,7 @@ object ForeignInkReader {
         left: Float,
         bottom: Float,
         height: Float,
+        pageLongEdgePt: Float,
         target: MutableList<Stroke>
     ) {
         val quads = dict.getDictionaryObject(COSName.getPDFName("QuadPoints")) as? COSArray ?: return
@@ -144,7 +152,9 @@ object ForeignInkReader {
                         page = page,
                         color = color,
                         width = width,
-                        highlighter = true
+                        highlighter = true,
+                        baseWidth = width * REFERENCE_PAGE_LONG_EDGE_PT /
+                            pageLongEdgePt.coerceAtLeast(1f),
                     )
                     stroke.points.add(InkPoint(startX, startY, 1f))
                     stroke.points.add(InkPoint(endX, endY, 1f))

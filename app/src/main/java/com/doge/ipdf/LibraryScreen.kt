@@ -11,11 +11,13 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
+import android.os.SystemClock
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -64,6 +66,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,6 +74,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -128,10 +133,30 @@ fun LibraryScreen(
 ) {
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val appContext = LocalContext.current.applicationContext
+    var cacheCleanupRunning by remember { mutableStateOf(false) }
     var historySheetOpen by remember { mutableStateOf(false) }
     var scheduleSheetOpen by remember { mutableStateOf(false) }
     val historySheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scheduleSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    val startCacheCleanup: () -> Unit = {
+        if (!cacheCleanupRunning) {
+            cacheCleanupRunning = true
+            scope.launch {
+                var message = "Cache cleanup failed"
+                try {
+                    message = AppCacheCleaner.clean(appContext).message(appContext)
+                } catch (_: Throwable) {
+                    message = "Cache cleanup failed"
+                } finally {
+                    cacheCleanupRunning = false
+                }
+                snackbar.currentSnackbarData?.dismiss()
+                snackbar.showSnackbar(message, duration = SnackbarDuration.Short)
+            }
+        }
+    }
 
     val clearHistory: () -> Unit = {
         onClearHistory()
@@ -166,6 +191,7 @@ fun LibraryScreen(
                 onHistoryClick = { historySheetOpen = true },
                 onScheduleClick = { scheduleSheetOpen = true },
                 onThemeSettings = onThemeSettings,
+                onHiddenCacheCleanup = startCacheCleanup,
                 modifier = Modifier.weight(1f).fillMaxHeight(),
             )
 
@@ -263,6 +289,7 @@ private fun LibraryLeftPane(
     onHistoryClick: () -> Unit,
     onScheduleClick: () -> Unit,
     onThemeSettings: () -> Unit,
+    onHiddenCacheCleanup: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier.padding(start = PanePadding, end = PanePadding, top = 16.dp)) {
@@ -275,6 +302,7 @@ private fun LibraryLeftPane(
             onHistoryClick = onHistoryClick,
             onScheduleClick = onScheduleClick,
             onThemeSettings = onThemeSettings,
+            onHiddenCacheCleanup = onHiddenCacheCleanup,
             onQueryChange = { value -> onFiltersChange { it.copy(query = value) } },
         )
 
@@ -414,13 +442,27 @@ private fun LibraryHeader(
     onHistoryClick: () -> Unit,
     onScheduleClick: () -> Unit,
     onThemeSettings: () -> Unit,
+    onHiddenCacheCleanup: () -> Unit,
     onQueryChange: (String) -> Unit,
 ) {
+    val currentCacheCleanup by rememberUpdatedState(onHiddenCacheCleanup)
     Row(
         modifier = Modifier.fillMaxWidth().height(58.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f).padding(end = 8.dp)) {
+        Column(
+            Modifier
+                .weight(1f)
+                .padding(end = 8.dp)
+                .pointerInput(Unit) {
+                    val detector = TapBurstDetector()
+                    detectTapGestures(onTap = {
+                        if (detector.onTap(SystemClock.uptimeMillis())) {
+                            currentCacheCleanup()
+                        }
+                    })
+                },
+        ) {
             Text(
                 text = "iPDF",
                 fontSize = 23.sp,

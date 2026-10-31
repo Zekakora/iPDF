@@ -3,6 +3,8 @@
 /.kotlin/
 /app/build/
 /build/
+# Local offline Gradle cache used for sandboxed builds
+/.gradle-home/
 
 # IDE settings and local machine configuration
 /.idea/

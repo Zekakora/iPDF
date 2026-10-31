@@ -54,12 +54,30 @@ The app is usable as a reading and handwriting prototype on the target tablet.
   schemes) with `singleTop` re-delivery, so it can be chosen as the system default PDF app from a
   file manager. The incoming URI is opened as a tab and added to history.
 - **Reading:** continuous page rendering with lazy per-page bitmaps, finger scrolling with fling,
-  slow-drag handoff, focal two-finger zoom, horizontal panning when the page is wider than the
-  screen, double-tap zoom, and per-document position/zoom restore.
+  focal two-finger zoom, horizontal panning when the page is wider than the screen, double-tap zoom,
+  and per-document position/zoom restore. Input ownership is explicit and lives in a small state
+  machine (`TouchArbiter`): every contact is either owned by the stylus, a pan, a pinch, a direct
+  lasso manipulation, or rejected. A stylus/eraser pointer always wins; when a pen is down, or when
+  the device reports it hovering, finger contacts are rejected, and contacts that were already down
+  stay rejected until every one of them lifts. A finger contact is only a candidate at first. One
+  finger must move past a ~18 dp arming distance before it may scroll, and that arming movement is
+  discarded, so the page does not lurch when the gesture is recognised. Two fingers must both move
+  by ~12 dp and change their span by ~24 dp before a pinch may start; the pinch then rebases on the
+  current span, so activation itself adds no zoom step. A third contact, a lifted contact, a stylus,
+  hover, or `ACTION_CANCEL` ends the gesture without handing the surviving contact a stale anchor. When
+  the panel reports usable `touchMajor`/`touchMinor`, a palm-sized ellipse is rejected as well; on
+  panels that report no reliable geometry the hover/contact rules are the primary protection.
+  Rendering keeps a coarse full-page base for the pages on screen, pinned against cache eviction,
+  and sharp zoom-bucket tiles are swapped in only when ready. The tile grid is frozen while a pinch
+  is in progress and rebuilt when the gesture settles, so scrolling and zooming never uncover a
+  bare white page just because a replacement tile is still being rendered.
 - **Loading and switching:** page sizes are measured once and cached, annotation adoption is a
   single PDFBox pass on first open (later opens skip the scan entirely), and page bitmaps render on
-  a background worker while white placeholders fill in. Switching tabs waits only for the small
-  stroke journal; the heavier PDF export continues in the background.
+  a background worker while white placeholders fill in. The reader keeps **one** page view for its
+  whole lifetime: switching tabs only swaps the document inside it, so the renderer and its worker
+  are never closed while the newly selected document is being opened. (Rebuilding the view per
+  document raced the outgoing close against the new renderer and left an empty dark page.) Switching
+  tabs waits only for the small stroke journal; the heavier PDF export continues in the background.
 - **Foreign ink annotations:** standard `/Ink` and `/Highlight` annotations created by other apps
   are adopted into the editable stroke list with PDFBox on first open (grey/RGB/CMYK `/C`,
   `/CA` opacity, `/BS /W` width; highlights become highlighter strokes along their quad). They can
@@ -74,15 +92,25 @@ The app is usable as a reading and handwriting prototype on the target tablet.
   tapping the selected preset opens its editor. Pen/highlighter presets expose width and colours:
   each tool has one shared colour row, and long-pressing a swatch opens a free HSV wheel with
   brightness and opacity whose result overwrites that swatch for every preset of the same tool.
-  The eraser reuses the
+  Brush and eraser sizes are **page-relative** (`brushWidthToPagePt`):
+  a preset keeps the same fraction of the page on an A4 sheet, a wide slide or a rotated page
+  instead of a fixed number of PDF points. The editor shows both the preset value and the width it
+  reaches on A4, and journals written by older builds are converted once so existing ink keeps its
+  appearance. The eraser reuses the
   same rail and editor, exposing the tip size and a choice between erasing pixels (only the part
-  under the tip disappears, splitting the stroke) and erasing whole strokes. A setting can detach
+  under the tip disappears, splitting the stroke) and erasing whole strokes; **each of the four
+  eraser presets remembers its own mode**, so a fine tip can erase pixels while a broad one removes
+  whole strokes. A setting can detach
   the presets into a draggable horizontal bubble. Pen strokes are pressure-weighted, colours and
   opacity are honoured on screen and in the PDF, the eraser and lasso edits are undoable, and the
   lasso selects strokes, moves them by dragging inside the selection and resizes them
   proportionally with the four corner handles (both with the stylus and with a finger, each as one
-  undoable action). Fingers never draw, so palm contact cannot leave marks; finger gestures are
-  ignored while the pen is down and briefly after it lifts. Stroke stabilization is adjustable from
+  undoable action). Fingers never draw, so palm contact cannot leave marks. The stylus is recognised
+  in any pointer slot: a hand that rests on the page before the pen arrives cannot swallow the
+  stroke, and when the nib lands any in-flight finger gesture is cancelled before the first ink
+  point is added. While the pen is down all remaining finger contacts stay rejected until they lift;
+  palm contacts that arrive before the pen are blocked while the device reports the pen hovering.
+  Stroke stabilization is adjustable from
   the gear in the reader's top bar (Off → Strong, persisted): it chases the pen with a
   distance-adaptive filter, so hand tremor is absorbed while deliberate movement still catches up,
   and the stroke lands exactly on the lift point. A document opens with **no tool selected**; the
@@ -122,6 +150,23 @@ The app is usable as a reading and handwriting prototype on the target tablet.
   course/category/folder rows animate into and out of the tree as they are expanded or collapsed
   while their chevrons rotate, and the filter chips and pills ease between selected and unselected
   colours.
+- **Touch diagnostics:** every gesture decision can be logged under the `iPdfTouch` tag
+  (`adb shell setprop log.tag.iPdfTouch DEBUG`, then restart the app). A line carries the action,
+  pointer count, tool type, contact size, `major`/`minor` and the verdict (`finger down`,
+  `touch blocked`, `selection drag`, `pan start`, `tap`, `pen`, `pinch begin`, `pen hover`); a lift
+  reports `moved=`, `scrolled=` and `fling=` in pixels. Use it to confirm whether a mis-touch is
+  being rejected by hover, by a palm-sized contact, or by the arming thresholds. These diagnostics
+  are compiled out of release builds (`BuildConfig.DEBUG` is false), even if the tag is set.
+- **Release builds:** `assembleRelease` produces a non-debuggable APK. No production keystore is
+  checked into the repository; the release variant reuses the existing debug signing configuration
+  so local release builds are installable, and must be re-signed with a real release key before
+  distribution. R8 is intentionally disabled until PDFBox and the optional reflective PenEngine
+  bridge are device-validated under shrinking.
+- **Hidden cache cleanup:** five quick taps on the iPDF wordmark at the top-left of the library
+  screen (within 3 s) clears regenerable app caches and the downloaded calendar feed cache. It
+  never touches pristine PDFs, stroke journals/backups, library or schedule settings, todos, or
+  any file on shared storage. A snackbar reports the space freed. The app writes diagnostics to
+  logcat, not to rotating files, so there are no file logs to retain.
 
 ### Known limitations
 
@@ -132,9 +177,17 @@ The app is usable as a reading and handwriting prototype on the target tablet.
 - Saving is a full PDF rewrite (not an incremental update). Encrypted/linearized PDFs and unusual
   document providers need more testing; some providers may refuse writes, in which case the app
   reports "Save failed" and keeps the journal.
-- Page bitmaps are rendered at screen density, so heavy zoom is slightly soft. Tile-based
-  rendering is the next quality step.
-- No text markup, lasso selection, OCR, cloud sync, or encryption support yet.
+- Pages are rendered at power-of-two zoom buckets and lightly scaled between buckets, so
+  intermediate zoom levels are slightly soft until the gesture settles and sharper tiles arrive.
+- **Palm-rejection limits:** Android has no public palm pointer type, so the page arbiter uses the
+  stylus/eraser tool type, stylus hover proximity, pointer IDs and, when the driver reports usable
+  values, contact major/minor geometry. On a panel that reports a palm as an ordinary small finger
+  *and* never sends stylus hover, a palm placed before the pen cannot be recognised until the nib
+  lands; the finger gesture is cancelled then, but movement made before that moment cannot be
+  retroactively undone. The Compose toolbar and dock are separate touch targets above the PDF
+  surface; the arbiter protects page gestures and does not classify contacts for those controls.
+  These scenarios still need physical-device testing on the target tablet.
+- No text markup, OCR, cloud sync, or encryption support yet.
 - The calendar parser reads the events as the feed supplies them. It does not expand `RRULE`
   recurrence rules, so a feed made of one recurring event shows only its first occurrence; the
   RWTHonline feed already contains every individual date. The subscription must be HTTPS.
